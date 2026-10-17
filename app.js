@@ -389,9 +389,9 @@ function moveModelCenterWithFinger(target, tip, anchor = { x: 0, y: 0 }, timesta
   if (!projected) return false;
   const desiredNdc = new THREE.Vector3(tip.x * 2 - 1 + anchor.x, 1 - tip.y * 2 + anchor.y, projected.ndc.z);
   const screenDistance = Math.hypot(desiredNdc.x - projected.ndc.x, desiredNdc.y - projected.ndc.y);
-  const MODEL_MOVE_DIRECT_LIMIT = .16; // high direct-follow threshold
-  const MODEL_MOVE_MAX_MS = 460; // response remains within 0.5 seconds
-  const MODEL_MOVE_MIN_MS = 120;
+  const MODEL_MOVE_DIRECT_LIMIT = .30; // ordinary movement follows the fingertip immediately
+  const MODEL_MOVE_MAX_MS = 190; // only very large jumps use a short smoothing arc
+  const MODEL_MOVE_MIN_MS = 45;
 
   if (modelMoveTransition && modelMoveTransition.target !== target) modelMoveTransition = null;
   if (!modelMoveTransition && screenDistance > MODEL_MOVE_DIRECT_LIMIT) {
@@ -402,7 +402,7 @@ function moveModelCenterWithFinger(target, tip, anchor = { x: 0, y: 0 }, timesta
     if (perpendicular.lengthSq() > 1e-8) perpendicular.normalize();
     const arcHeight = Math.min(.16, Math.max(.035, distance * .18));
     const control = new THREE.Vector3((start.x + end.x) * .5 + perpendicular.x * arcHeight, (start.y + end.y) * .5 + perpendicular.y * arcHeight, start.z);
-    modelMoveTransition = { target, start, end, control, startedAt: timestamp, duration: Math.min(MODEL_MOVE_MAX_MS, Math.max(MODEL_MOVE_MIN_MS, 180 + distance * 260)) };
+    modelMoveTransition = { target, start, end, control, startedAt: timestamp, duration: Math.min(MODEL_MOVE_MAX_MS, Math.max(MODEL_MOVE_MIN_MS, 55 + distance * 120)) };
   } else if (modelMoveTransition) {
     // Do not reject a fast hand movement: keep the current arc's start and
     // continuously move its endpoint toward the newest fingertip position.
@@ -936,11 +936,13 @@ function classifyModelHandPose(landmarks, pinching) {
 }
 
 function modelPoseConfirmMs(pose) {
-  return ({ idle: 140, scale: 160, move: 170, rotate: 190, select: 220, whole: 220 })[pose] ?? 180;
+  return ({ idle: 120, scale: 140, move: 90, rotate: 170, select: 140, whole: 180 })[pose] ?? 150;
 }
 
 function modelPoseConfirmFrames(pose) {
-  return (pose === "select" || pose === "whole") ? 6 : 5;
+  if (pose === "move") return 3;
+  if (pose === "select") return 4;
+  return pose === "whole" ? 5 : 4;
 }
 
 function normalizedPalmPoint(landmarks) {
@@ -1043,7 +1045,7 @@ function applyModelHandControl(landmarks, timestamp, pose = "idle") {
   // little raw fingertip into the filtered point so fast movement does not lag
   // behind, while the One Euro filter still removes visible jitter.
   const filteredTip = smoothedTip || landmarks && { x: landmarks[8].x, y: landmarks[8].y };
-  const rawBlend = .42;
+  const rawBlend = .68;
   const modelTipX = filteredTip ? filteredTip.x * (1 - rawBlend) + landmarks[8].x * rawBlend : landmarks?.[8]?.x;
   const modelTipY = filteredTip ? filteredTip.y * (1 - rawBlend) + landmarks[8].y * rawBlend : landmarks?.[8]?.y;
   const tip = landmarks ? { x: 1 - modelTipX, y: modelTipY } : null;
@@ -1109,7 +1111,7 @@ function applyModelHandControl(landmarks, timestamp, pose = "idle") {
       if (hovered) showModelSelectionHelper(hovered);
       else showModelSelectionHelper(selectedModelObject);
     }
-    const progress = hovered ? Math.min(1, Math.max(0, (timestamp - modelHoverSince) / 550)) : 0;
+    const progress = hovered ? Math.min(1, Math.max(0, (timestamp - modelHoverSince) / 320)) : 0;
     cursor.style.setProperty("--select-progress", (progress * 360) + "deg");
     if (hovered && progress >= 1 && !modelSelectionCommitted) {
       selectModelObject(hovered); modelSelectionCommitted = true;
@@ -1120,7 +1122,7 @@ function applyModelHandControl(landmarks, timestamp, pose = "idle") {
     }
     $("modelViewerHint").textContent = hovered
       ? (modelPickCandidates.length > 1 ? `重叠部件 ${modelPickIndex + 1}/${modelPickCandidates.length} · ${modelSelectionCommitted ? "已选中；再次做 V 字可轮换" : "保持指向 · " + Math.round(progress * 100) + "%"}` : (modelSelectionCommitted ? "部件已选中 · 单指移动、握拳旋转、捏合缩放" : "指向部件并保持 · " + Math.round(progress * 100) + "%"))
-      : "V 字手势：将指尖移到要选的部件上并停留约 0.5 秒。";
+      : "V 字手势：将指尖移到要选的部件上并停留约 0.3 秒。";
     updateModelGestureUI();
     return;
   }
