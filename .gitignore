@@ -1,0 +1,8 @@
+.env
+dist/
+node_modules/
+*.log
+.DS_Store
+Thumbs.db
+partof_BP3D_4.0_obj_99.zip
+video-frames/

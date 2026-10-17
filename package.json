@@ -1,0 +1,16 @@
+{
+  "name": "air-drawing",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "MediaPipe hand tracking, air drawing, and browser-based 3D model workspace",
+  "scripts": {
+    "start": "node server.mjs",
+    "dev": "node server.mjs",
+    "check": "node --check app.js && node --check server.mjs",
+    "catalog": "node scripts/build_model_catalog.mjs"
+  },
+  "engines": {
+    "node": ">=18.18"
+  }
+}

@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#08111f" />
+    <title>Air Drawing | 实时隔空绘画</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="styles.css" />
+    <!-- 本地化依赖：vendor/ 内含 three@0.170.0 与 MediaPipe tasks-vision，离线可用 -->
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "./vendor/three/three.module.js",
+          "three/addons/": "./vendor/three/jsm/"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="topbar">
+        <div class="brand-block">
+          <div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></div>
+          <div>
+            <p class="eyebrow">VISION STUDIO / 01</p>
+            <h1>Air Drawing</h1>
+          </div>
+        </div>
+        <div class="top-status" aria-live="polite">
+          <span class="status-dot" id="headerStatusDot"></span>
+          <span id="headerStatusText">摄像头未连接</span>
+        </div>
+      </header>
+
+      <section class="workspace">
+        <aside class="control-rail">
+          <div class="panel-heading">
+            <span class="section-index">01</span>
+            <div><p class="eyebrow">CONTROL DECK</p><h2>控制台</h2></div>
+          </div>
+
+          <div class="control-group">
+            <p class="label">设备</p>
+            <button class="primary-button" id="startCameraBtn" type="button"><span class="button-icon">◉</span>启动摄像头</button>
+            <button class="secondary-button" id="stopCameraBtn" type="button" disabled><span class="button-icon">■</span>停止摄像头</button>
+          </div>
+
+          <div class="control-group draw-only-control">
+            <p class="label">绘画工具</p>
+            <div class="tool-row stroke-tool-row">
+              <button class="tool-button active" id="penBtn" type="button" aria-pressed="true" title="画笔"><span class="tool-glyph">✎</span><span>画笔</span></button>
+              <button class="tool-button" id="eraserBtn" type="button" aria-pressed="false" title="橡皮擦"><span class="tool-glyph">⌫</span><span>橡皮擦</span></button>
+              <button class="tool-button" id="selectStrokeBtn" type="button" aria-pressed="false" title="选择并拖动一整笔"><span class="tool-glyph">↗</span><span>选择/移动</span></button>
+            </div>
+            <div class="tool-row compact">
+              <button class="icon-button" id="undoBtn" type="button" title="撤销上一笔" aria-label="撤销上一笔">↶</button>
+              <button class="icon-button" id="clearBtn" type="button" title="清空画布" aria-label="清空画布">⌫</button>
+              <button class="secondary-button inline" id="drawToggleBtn" type="button" aria-pressed="true"><span class="button-icon">✦</span><span id="drawToggleLabel">绘画已启用</span></button>
+            </div>
+          </div>
+
+          <div class="control-group draw-only-control">
+            <div class="label-row"><p class="label">手指使用模式</p><span class="mono">GESTURE</span></div>
+            <div class="gesture-row" role="group" aria-label="手指使用模式">
+              <button class="gesture-button" data-gesture-mode="pinch" type="button" aria-pressed="false">捏合绘画</button>
+              <button class="gesture-button active" data-gesture-mode="index" type="button" aria-pressed="true">食指绘画</button>
+            </div>
+          </div>
+
+          <div class="control-group">
+            <div class="label-row"><p class="label">多手识别</p><span class="mono">UP TO 2</span></div>
+            <label class="hand-role-setting" for="primaryHandSelect"><span>交互主手</span><select id="primaryHandSelect" aria-label="选择交互主手"><option value="Right" selected>右手主控</option><option value="Left">左手主控</option></select></label>
+            <button class="model-mini-button hand-label-toggle" id="handLabelToggle" type="button" aria-pressed="false">左右手标签：正常</button>
+            <p class="hand-role-note">两只手会分别标记；仅主控手绘画或操作 3D，靠近交叉时自动暂停，避免串手。若画面标签与实际手相反，点击上方按钮切换校正。</p>
+          </div>
+
+          <div class="control-group draw-only-control">
+            <div class="label-row"><p class="label">颜色</p><span class="mono" id="colorValue">#54E6C0</span></div>
+            <div class="color-row" role="radiogroup" aria-label="画笔颜色">
+              <button class="swatch active" style="--swatch:#54E6C0" data-color="#54E6C0" aria-label="薄荷绿"></button>
+              <button class="swatch" style="--swatch:#6EA8FE" data-color="#6EA8FE" aria-label="蓝色"></button>
+              <button class="swatch" style="--swatch:#FFCC66" data-color="#FFCC66" aria-label="黄色"></button>
+              <button class="swatch" style="--swatch:#FF6B91" data-color="#FF6B91" aria-label="粉红色"></button>
+              <label class="custom-color" title="自定义颜色"><input id="colorPicker" type="color" value="#54E6C0" aria-label="自定义颜色" /><span>+</span></label>
+            </div>
+          </div>
+
+          <div class="control-group range-group draw-only-control">
+            <div class="label-row"><p class="label">笔刷粗细</p><span class="mono" id="sizeValue">8 px</span></div>
+            <input id="brushSize" type="range" min="2" max="36" value="8" />
+            <div class="range-labels"><span>细</span><span>粗</span></div>
+          </div>
+
+          <div class="hint-box draw-only-control">
+            <div class="hint-icon">◌</div>
+            <div><strong id="gestureHintTitle">捏合开始绘画</strong><p id="gestureHintText">拇指与食指靠近时落笔，松开即可抬笔。</p></div>
+          </div>
+
+          <footer class="rail-footer"><span>MEDIAPIPE HAND LANDMARKER</span><span class="version">v1.0</span></footer>
+        </aside>
+
+        <section class="stage" id="stage">
+          <div class="stage-header">
+            <div><p class="eyebrow">LIVE WORKSPACE</p><h2>实时工作区</h2></div>
+            <div class="stage-actions"><div class="workspace-tabs" role="tablist" aria-label="工作区"><button class="view-toggle workspace-tab active" id="drawWorkspaceBtn" type="button" role="tab" aria-selected="true">✎ 隔空绘画</button><button class="view-toggle workspace-tab" id="modelWorkspaceBtn" type="button" role="tab" aria-selected="false">◇ 3D 解剖模型</button></div><button class="view-toggle" id="singleModeBtn" type="button" aria-pressed="false">▣ 单屏工作台</button><div class="stage-metrics"><div><span class="metric-label">FPS</span><strong id="fpsValue">--</strong></div><div><span class="metric-label">手部 / 2</span><strong id="handValue">0 / 2</strong></div><div class="depth-metric"><span class="metric-label">相对距离 / Z</span><strong id="depthValue" title="1.00x 是校准位置；小于 1 更近，大于 1 更远。Z 是 MediaPipe 相对深度，不是厘米。">未校准</strong></div><button class="view-toggle depth-calibrate" id="depthCalibrateBtn" type="button" title="以当前手部位置作为相对距离参考">校准距离</button></div></div>
+          </div>
+          <div class="canvas-layout">
+            <div class="camera-card">
+              <div class="card-header"><span>CAMERA FEED</span><span class="live-badge" id="liveBadge">OFFLINE</span></div>
+              <div class="video-wrap" id="videoWrap">
+                <video id="video" autoplay playsinline muted></video>
+                <canvas id="landmarkCanvas"></canvas>
+                <div class="camera-placeholder" id="cameraPlaceholder"><div class="placeholder-ring">◉</div><p>启动摄像头以开始追踪</p><span>请允许浏览器访问摄像头</span></div>
+                <div class="tracking-chip" id="trackingChip"><span class="chip-dot"></span><span id="trackingChipText">等待手部</span></div>
+              </div>
+              <div class="camera-footer"><div><span class="metric-label">指尖坐标</span><strong class="mono" id="coordinateValue">X --- / Y ---</strong></div><div><span class="metric-label">手势</span><strong id="gestureValue">等待输入</strong></div></div>
+            </div>
+            <div class="drawing-card">
+              <div class="drawing-pane" id="drawingPane">
+                <div class="card-header"><span>DRAWING SURFACE</span><span class="mode-badge" id="modeBadge">READY</span></div>
+                <div class="drawing-wrap" id="drawingWrap"><canvas id="stageVideoCanvas" class="stage-video-canvas" aria-hidden="true"></canvas><canvas id="drawingCanvas"></canvas><canvas id="stageHandCanvas" class="stage-hand-canvas" aria-hidden="true"></canvas><div class="tip-cursor" id="tipCursor" aria-hidden="true"></div><div class="draw-empty" id="drawEmpty"><div class="crosshair">＋</div><p id="drawEmptyTitle">伸出食指开始创作</p><span>线条会出现在这里</span></div></div>
+                <div class="drawing-footer"><span><i class="legend-dot"></i><span id="drawingStateText">画布待命</span></span><span class="mono" id="strokeCount">0 笔</span></div>
+              </div>
+              <section class="model-workspace" id="modelWorkspacePane" hidden aria-label="3D 解剖模型工作区">
+                <aside class="model-sidebar">
+                  <div class="model-panel-block hyper3d-block">
+                    <div class="model-block-heading"><strong>Hyper3D · Rodin</strong><span id="hyper3dConnectionState">检查本地服务…</span></div>
+                    <p class="model-note">文字或参考图生成 3D 模型，完成后可直接导入场景。API 密钥只保存在本机服务端。</p>
+                    <label class="model-control-label" for="hyper3dInputMode">生成方式</label>
+                    <select id="hyper3dInputMode" class="model-search hyper3d-mode"><option value="text">文字生成</option><option value="image">图片生成（最多 5 张）</option></select>
+                    <label class="model-control-label hyper3d-prompt-label" for="hyper3dPrompt">模型描述 / 可选方向提示</label>
+                    <textarea id="hyper3dPrompt" class="model-search hyper3d-prompt" maxlength="1024" placeholder="例如：真实比例的胰腺解剖模型，表面平滑，单一独立结构"></textarea>
+                    <label class="hyper3d-upload" id="hyper3dUploadRow" for="hyper3dImages" hidden><span>＋ 选择参考图</span><small id="hyper3dImageNames">PNG / JPG / WEBP，最多 5 张</small></label>
+                    <input id="hyper3dImages" type="file" accept="image/png,image/jpeg,image/webp" multiple hidden>
+                    <div class="hyper3d-spec">默认：Gen‑2.5 Medium · GLB · Raw 20k（快速档）</div>
+                    <button class="model-primary-button hyper3d-generate" id="hyper3dGenerateBtn" type="button" disabled>◇ 生成 3D 模型</button>
+                    <div class="hyper3d-task-state" id="hyper3dTaskState" aria-live="polite">请先启动本地 Node 服务并配置 Hyper3D API Key。</div>
+                    <div class="hyper3d-results" id="hyper3dResults"></div>
+                    <a class="hyper3d-dashboard" href="https://hyper3d.ai/workspace/api-dashboard" target="_blank" rel="noreferrer">打开 Hyper3D API Dashboard ↗</a>
+                  </div>
+                  <div class="model-panel-block module-picker-block">
+                    <div class="model-block-heading"><strong>快速选择模块</strong><span>建议从小模块开始</span></div>
+                    <select id="modelModuleSelect" class="model-search module-select" aria-label="选择解剖模块" disabled>
+                      <option value="">正在读取可用模块…</option>
+                    </select>
+                    <p class="model-note" id="modelModuleDescription">快速模块使用模型库中真实存在的独立 OBJ 部件。可先从胰腺开始熟悉操作。</p>
+                    <div class="module-action-row">
+                      <button class="model-primary-button" id="addModelModuleBtn" type="button" disabled>添加到当前场景</button>
+                      <button class="model-mini-button" id="replaceModelModuleBtn" type="button" disabled>清空后加载</button>
+                    </div>
+                    <p class="module-start-guide"><strong>开始操作：</strong>加载后启用 3D 手势 → V 字悬停选部件 → 单食指移动、握拳旋转、捏合缩放；竖拇指切整体，张掌或放松停手。</p>
+                  </div>
+                  <div class="model-panel-block">
+                    <div class="model-block-heading"><strong>模型库</strong><span id="catalogCount">加载中…</span></div>
+                    <input id="catalogSearch" class="model-search" type="search" placeholder="搜索英文名称或 FJ 编号" autocomplete="off" aria-label="搜索模型库">
+                    <select id="catalogResults" class="catalog-results" multiple aria-label="模型库结果" size="8"></select>
+                    <button class="model-primary-button" id="loadCatalogBtn" type="button" disabled>＋ 添加选中部件</button>
+                    <div class="model-import-actions"><button class="model-mini-button" id="importObjBtn" type="button">导入 OBJ / GLB</button><button class="model-mini-button" id="importFolderBtn" type="button">导入整个文件夹</button></div>
+                    <input id="objFileInput" type="file" accept=".obj,.glb,text/plain,model/gltf-binary" multiple hidden>
+                    <input id="objFolderInput" type="file" accept=".obj,text/plain" webkitdirectory multiple hidden>
+                    <p class="model-note" id="modelSourceNote">OBJ / GLB 会作为独立部件加入；多选可组合查看。</p>
+                  </div>
+                  <div class="model-panel-block scene-block">
+                    <div class="model-block-heading"><strong>场景部件</strong><span id="scenePartCount">0 个</span></div>
+                    <p class="model-control-label">手势操作（启用后自动识别姿势）</p>
+                    <div class="model-target-row" role="group" aria-label="手势操作对象"><span>操作对象</span><button class="model-target-button active" data-model-target="part" type="button" aria-pressed="true">选中部件</button><button class="model-target-button" data-model-target="whole" type="button" aria-pressed="false">整体模型</button></div>
+                    <div class="scene-toolbar"><div class="transform-modes" role="group" aria-label="鼠标变换手柄模式"><button class="transform-mode active" data-transform-mode="translate" type="button" title="鼠标变换手柄：移动">移</button><button class="transform-mode" data-transform-mode="rotate" type="button" title="鼠标变换手柄：旋转">转</button><button class="transform-mode" data-transform-mode="scale" type="button" title="鼠标变换手柄：缩放">缩</button></div><div class="scene-toolbar-actions"><button class="model-mini-button active" id="screenAxisToggle" type="button" aria-pressed="true" title="显示相对屏幕的参考坐标轴">屏幕坐标轴</button><button class="model-mini-button" id="resetViewBtn" type="button">重置视角</button></div></div>
+                    <div class="model-tuning"><label for="modelSensitivity">灵敏度 <strong id="modelSensitivityValue">0.65×</strong></label><input id="modelSensitivity" type="range" min="0.25" max="1.25" step="0.05" value="0.65"><label for="modelSmoothing">防抖平滑 <strong id="modelSmoothingValue">65%</strong></label><input id="modelSmoothing" type="range" min="0" max="90" step="5" value="65"><p>建议从默认值开始；抖动时把平滑提高到 75–85%；物体响应太快时把灵敏度降到 0.45–0.60×；拖动迟缓再小幅提高。</p></div>
+                    <label class="model-two-hand-toggle" for="modelTwoHandMode"><input id="modelTwoHandMode" type="checkbox"><span><strong>双手高级模式</strong><small>两手同时捏合：中心平移 · 距离缩放 · 夹角滚转</small></span></label>
+                    <div class="scene-actions pose-actions"><button class="model-mini-button" id="resetModelTargetBtn" type="button" disabled>复位目标</button><button class="model-mini-button" id="resetAllModelBtn" type="button" disabled>复位全部</button></div>
+                    <div class="scene-actions pose-actions"><button class="model-mini-button" id="saveModelPoseBtn" type="button" disabled>保存状态</button><button class="model-mini-button" id="restoreModelPoseBtn" type="button" title="当前部件组合还没有保存状态" disabled>恢复保存</button></div>
+                    <div class="scene-actions"><button class="model-mini-button" id="explodePartBtn" type="button" title="单次拆分动作，不会由捏合松开触发" disabled>拆分观察</button><button class="model-mini-button" id="removeAllPartsBtn" type="button" disabled>移除全部</button></div>
+                    <p class="model-start-guide"><strong>手势：</strong>V 字指向并停留选部件；单食指移动，握拳旋转，拇指与食指捏合后上下移动缩放；竖起拇指切换到整体模型。张掌或放松手指即停。</p>
+                    <div class="scene-part-list" id="scenePartList"><div class="scene-empty">添加一个或多个部件后，可在此选择、隐藏或拆分观察。</div></div>
+                  </div>
+                </aside>
+                <div class="model-view-column">
+                  <div class="model-toolbar"><div><strong id="selectedPartName">尚未加载模型</strong><span id="modelViewerHint">启用手势后，V 字选部件；单指移、握拳转、捏合缩放。</span><div class="model-gesture-strip"><span id="modelGestureState">鼠标 / 变换手柄</span><span>V字选件 · 单指移 · 握拳转 · 捏合缩 · 竖拇指整体</span></div></div><div class="model-toolbar-actions"><button class="model-mini-button hand-control-button" id="modelHandControlBtn" type="button" aria-pressed="false">✋ 启用 3D 手势</button><button class="model-mini-button" id="framePartBtn" type="button" disabled>聚焦部件</button></div></div>
+                  <div class="model-viewer" id="modelViewer">
+                    <div class="model-viewer-placeholder" id="modelViewerPlaceholder"><span class="model-placeholder-mark">◇</span><strong>3D 解剖工作台</strong><p>先从左侧快速模块开始，或搜索 FJ 编号 / 解剖名称后添加部件。</p><small>鼠标拖拽旋转视角 · 滚轮缩放 · 右键平移</small></div>
+                    <div class="model-hand-cursor" id="modelHandCursor" aria-hidden="true"><i></i><span></span></div>
+                  <div class="model-legend"><span><i class="axis-x"></i>X 屏幕左右</span><span><i class="axis-y"></i>Y 屏幕上下</span><span><i class="axis-z"></i>Z 屏幕法线 ⊙</span><span>单位：mm</span></div>
+                  </div>
+                  <div class="model-attribution">BodyParts3D, (c) The Database Center for Life Science · CC BY-SA 2.1 Japan</div>
+                </div>
+              </section>
+            </div>
+          </div>
+          <div class="status-bar" id="statusBar"><span class="status-icon">i</span><span id="statusMessage">准备就绪。启动摄像头后，模型会自动加载。</span></div>
+        </section>
+      </section>
+    </main>
+    <script type="module" src="app.js"></script>
+  </body>
+</html>
