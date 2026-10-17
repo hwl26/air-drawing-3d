@@ -932,10 +932,10 @@ function classifyModelHandPose(landmarks, pinching) {
   const palmScale = Math.hypot(landmarks[0].x - landmarks[9].x, landmarks[0].y - landmarks[9].y, (landmarks[0].z || 0) - (landmarks[9].z || 0));
   const middleTipReach = Math.hypot(landmarks[12].x - landmarks[9].x, landmarks[12].y - landmarks[9].y, (landmarks[12].z || 0) - (landmarks[9].z || 0));
   const index = fingerExtensionAngle(landmarks, 5, 6, 8) > 112;
-  // An angle alone can call a curled middle finger "extended" when the hand
-  // is viewed obliquely. A real V also carries its middle fingertip well past
-  // the middle MCP relative to palm length; this keeps index-pointing from
-  // being mistaken for selection.
+  // Keep a tolerant middle-finger estimate for the non-selection poses, then
+  // use a stricter test below for V selection. With an oblique camera view a
+  // curled middle finger can have a misleading joint angle and must not steal
+  // an index-pointing movement as a V gesture.
   const middle = fingerExtensionAngle(landmarks, 9, 10, 12) > 112 && middleTipReach > palmScale * .78;
   const ring = fingerExtensionAngle(landmarks, 13, 14, 16) > 135;
   const pinky = fingerExtensionAngle(landmarks, 17, 18, 20) > 135;
@@ -947,8 +947,9 @@ function classifyModelHandPose(landmarks, pinching) {
   const fistClosed = !index && !middle && !ring && !pinky;
   // Selection wins over pinch so a V pose is not stolen by a transient thumb
   // landmark error. A raised thumb is a one-shot target-scope command.
+  const middleClearlyExtended = fingerExtensionAngle(landmarks, 9, 10, 12) > 138 && middleTipReach > palmScale * 1.02;
   const vGap = Math.hypot(landmarks[8].x - landmarks[12].x, landmarks[8].y - landmarks[12].y);
-  const vPose = index && middle && !ring && !pinky && vGap > palmScale * .18;
+  const vPose = index && middleClearlyExtended && !ring && !pinky && vGap > palmScale * .32;
   if (vPose) return "select";
   // A thumb command must be unambiguous: the thumb is extended while all four
   // fingers are folded.  Using `>= 3` made an index+thumb pose look like a
