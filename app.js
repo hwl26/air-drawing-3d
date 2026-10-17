@@ -907,10 +907,13 @@ function updateModelGestureUI() {
 }
 
 function classifyModelHandPose(landmarks, pinching) {
-  const index = fingerExtensionAngle(landmarks, 5, 6, 8) > 138;
-  const middle = fingerExtensionAngle(landmarks, 9, 10, 12) > 138;
-  const ring = fingerExtensionAngle(landmarks, 13, 14, 16) > 138;
-  const pinky = fingerExtensionAngle(landmarks, 17, 18, 20) > 138;
+  // Perspective and hand tilt can make a truly straight finger measure below
+  // 138 degrees. Use a tolerant extension threshold here and keep the V pose
+  // distinct by requiring the ring and little fingers to remain folded.
+  const index = fingerExtensionAngle(landmarks, 5, 6, 8) > 120;
+  const middle = fingerExtensionAngle(landmarks, 9, 10, 12) > 120;
+  const ring = fingerExtensionAngle(landmarks, 13, 14, 16) > 120;
+  const pinky = fingerExtensionAngle(landmarks, 17, 18, 20) > 120;
   // Thumb angle changes sharply with camera orientation. Its tip distance from
   // the index MCP is a more stable indication that the thumb points up/out.
   const palmScale = Math.hypot(landmarks[0].x - landmarks[9].x, landmarks[0].y - landmarks[9].y, (landmarks[0].z || 0) - (landmarks[9].z || 0));
