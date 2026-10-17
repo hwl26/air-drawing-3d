@@ -51,6 +51,7 @@ let primaryHand = "Right";
 // some drivers mirror the selfie frame before inference. Keep a user-visible
 // correction switch instead of silently guessing.
 let swapHandLabels = false;
+let primaryHandTrack = null;
 let singleScreen = false;
 let isEraser = false;
 let selectionMode = false;
@@ -1703,6 +1704,38 @@ function handLabelFromResult(handedness) {
   return swapHandLabels ? (label === "Left" ? "Right" : "Left") : label;
 }
 
+function getHandMetrics(landmarks) {
+  const centerIndices = [0, 5, 9, 13, 17];
+  const center = centerIndices.reduce((sum, index) => ({ x: sum.x + landmarks[index].x / centerIndices.length, y: sum.y + landmarks[index].y / centerIndices.length }), { x: 0, y: 0 });
+  const palmSpan = Math.hypot(landmarks[5].x - landmarks[17].x, landmarks[5].y - landmarks[17].y);
+  return { center, palmSpan };
+}
+
+function choosePrimaryHand(hands) {
+  const candidates = hands.filter((hand) => hand.label === primaryHand || (!hand.label && hands.length === 1));
+  if (!candidates.length) return null;
+  candidates.forEach((hand) => { hand.metrics = getHandMetrics(hand.landmarks); });
+  candidates.sort((a, b) => b.metrics.palmSpan - a.metrics.palmSpan);
+  const largest = candidates[0];
+  if (!primaryHandTrack) {
+    primaryHandTrack = { center: { ...largest.metrics.center }, palmSpan: largest.metrics.palmSpan, label: largest.label, locked: true };
+    return largest;
+  }
+  const distanceToLock = (hand) => Math.hypot(hand.metrics.center.x - primaryHandTrack.center.x, hand.metrics.center.y - primaryHandTrack.center.y);
+  const continuity = [...candidates].sort((a, b) => distanceToLock(a) - distanceToLock(b))[0];
+  const lockedDistance = distanceToLock(continuity);
+  const sizeRatio = continuity.metrics.palmSpan / Math.max(.0001, primaryHandTrack.palmSpan);
+  // A much smaller, spatially distant hand is usually a background hand. Keep
+  // the controller paused until the locked foreground hand returns instead of
+  // silently transferring control to it.
+  if (lockedDistance > .42 && sizeRatio < .82) return null;
+  const selected = lockedDistance < .34 ? continuity : largest;
+  primaryHandTrack.center = { ...selected.metrics.center };
+  primaryHandTrack.palmSpan = primaryHandTrack.palmSpan * .82 + selected.metrics.palmSpan * .18;
+  primaryHandTrack.label = selected.label;
+  return selected;
+}
+
 function assignHandRoles(result) {
   const landmarks = result.landmarks || [];
   const hands = landmarks.map((points, index) => ({ landmarks: points, label: handLabelFromResult(result.handednesses?.[index]) }));
@@ -1710,20 +1743,21 @@ function assignHandRoles(result) {
     // A single hand with a temporarily missing handedness category is still a
     // safe interaction target. With two hands we require stable labels below to
     // avoid accidentally assigning the secondary hand as the controller.
-    hands[0].interactive = !hands[0].label || hands[0].label === primaryHand;
-    return { hands, active: hands[0].interactive ? hands[0] : null, secondary: null, ambiguous: false };
+    const active = choosePrimaryHand(hands);
+    hands[0].interactive = Boolean(active && active === hands[0]);
+    return { hands, active, secondary: null, ambiguous: Boolean(hands[0].label && !active) };
   }
   if (hands.length > 1) {
-    const primary = hands.find((hand) => hand.label === primaryHand);
-    const secondary = hands.find((hand) => hand.label && hand.label !== primaryHand);
+    const primary = choosePrimaryHand(hands);
+    const secondary = hands.find((hand) => hand !== primary && hand.label && hand.label !== primaryHand);
     if (primary && secondary) {
       const wristDistance = Math.hypot(primary.landmarks[0].x - secondary.landmarks[0].x, primary.landmarks[0].y - secondary.landmarks[0].y);
-      if (wristDistance < .16) return { hands, active: null, secondary: null, ambiguous: true };
+      if (wristDistance < .16 || wristDistance > .58) return { hands, active: primary, secondary: null, ambiguous: wristDistance < .16 };
       primary.interactive = true;
       secondary.interactive = false;
       return { hands, active: primary, secondary, ambiguous: false };
     }
-    return { hands, active: null, secondary: null, ambiguous: true };
+    return { hands, active: primary, secondary: null, ambiguous: !primary };
   }
   return { hands, active: null, secondary: null, ambiguous: false };
 }
@@ -1901,6 +1935,7 @@ function stopCamera() {
   if (frameLoopMode === "raf" && animationId !== null) cancelAnimationFrame(animationId);
   animationId = null; frameCallbackId = null; frameLoopMode = null;
   if (stream) stream.getTracks().forEach((track) => track.stop()); stream = null; video.srcObject = null;
+  primaryHandTrack = null;
   finishStroke(); landmarkCtx.clearRect(0, 0, landmarkCanvas.width, landmarkCanvas.height); stageVideoCtx.clearRect(0, 0, stageVideoCanvas.getBoundingClientRect().width, stageVideoCanvas.getBoundingClientRect().height); resetDepthMeasurement(false); updateTracking(null);
   $("cameraPlaceholder").classList.remove("hidden"); $("startCameraBtn").disabled = false; $("stopCameraBtn").disabled = true; $("liveBadge").textContent = "OFFLINE"; $("liveBadge").classList.remove("on"); setHeaderStatus("摄像头未连接"); setStatus("摄像头已停止。点击启动摄像头重新开始。");
 }
@@ -2024,6 +2059,7 @@ $("clearBtn").addEventListener("click", () => { finishStroke(); strokes = []; se
 $("depthCalibrateBtn").addEventListener("click", calibrateDepth);
 $("primaryHandSelect").addEventListener("change", (event) => {
   primaryHand = event.target.value;
+  primaryHandTrack = null;
   finishStroke();
   lastModelHandTip = null; modelMoveAnchor = null; modelHandGesture = false; modelHandPose = "idle"; modelGestureCandidate = null; modelGestureCandidateFrames = 0;
   updateModelGestureUI();
@@ -2031,6 +2067,7 @@ $("primaryHandSelect").addEventListener("change", (event) => {
 });
 $("handLabelToggle").addEventListener("click", (event) => {
   swapHandLabels = !swapHandLabels;
+  primaryHandTrack = null;
   event.currentTarget.setAttribute("aria-pressed", String(swapHandLabels));
   event.currentTarget.textContent = `左右手标签：${swapHandLabels ? "已反转" : "正常"}`;
   finishStroke();
