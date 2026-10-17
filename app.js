@@ -552,7 +552,7 @@ function updateScenePartList() {
     const visibility = document.createElement("button"); visibility.className = "scene-visibility"; visibility.type = "button"; visibility.textContent = part.object.visible ? "显" : "隐"; visibility.title = "显示/隐藏部件"; visibility.addEventListener("click", () => { part.object.visible = !part.object.visible; visibility.textContent = part.object.visible ? "显" : "隐"; });
     row.append(select, visibility); host.append(row);
   });
-  $("scenePartCount").textContent = `${modelParts.length} 个`; $("removeAllPartsBtn").disabled = !modelParts.length; $("framePartBtn").disabled = !selectedModelObject;
+  $("scenePartCount").textContent = `${modelParts.length} 个`; $("removeAllPartsBtn").disabled = !modelParts.length; $("framePartBtn").disabled = !selectedModelObject; $("frameAllBtn").disabled = !modelParts.length;
   if ($("selectAllModelBtn")) $("selectAllModelBtn").disabled = modelParts.length < 2;
   if ($("clearModelSelectionBtn")) $("clearModelSelectionBtn").disabled = selectedModelObjects.size < 2;
   const selectedRecord = modelParts.find((item) => item.object === selectedModelObject);
@@ -646,6 +646,18 @@ function frameModelObjects(objects) {
 function frameSelectedModel() {
   if (!selectedModelObject) return;
   frameModelObjects([selectedModelObject]);
+  setStatus("已聚焦当前选中部件。", "info");
+}
+
+function frameAllModelObjects() {
+  if (!modelParts.length) return;
+  const visible = modelParts.map((part) => part.object).filter((object) => object?.visible);
+  if (!visible.length) {
+    setStatus("当前没有可显示的部件。", "info");
+    return;
+  }
+  frameModelObjects(visible);
+  setStatus("已显示全部可见部件；可继续选择并操作感兴趣的元件。", "info");
 }
 
 function explodeSelectedModel() {
@@ -1966,6 +1978,7 @@ $("clearModelSelectionBtn").addEventListener("click", () => { const first = getV
 $("saveModelPoseBtn").addEventListener("click", saveModelPose);
 $("restoreModelPoseBtn").addEventListener("click", restoreSavedModelPose);
 $("framePartBtn").addEventListener("click", frameSelectedModel);
+$("frameAllBtn").addEventListener("click", frameAllModelObjects);
 $("explodePartBtn").addEventListener("click", explodeSelectedModel);
 $("removeAllPartsBtn").addEventListener("click", () => { modelParts.forEach(disposeModelPart); modelParts = []; selectedModelObjects.clear(); selectedModelObject = null; modelSelectionGroup?.clear(); showModelSelectionHelper(null); resetModelAssemblyTransform(); modelTransform?.detach(); $("modelViewerPlaceholder")?.classList.remove("hidden"); updateScenePartList(); updateSelectedPartLabel(); updateModelGestureUI(); setStatus("已移除场景中的全部部件。", "info"); });
 $("modelHandControlBtn").addEventListener("click", () => { modelHandControl = !modelHandControl; lastModelHandTip = null; modelMoveAnchor = null; modelHandGesture = false; modelHandPose = "idle"; modelGestureCandidate = null; modelGestureCandidateFrames = 0; modelSelectionCommitted = false; resetTwoHandControl(); $("modelHandControlBtn").setAttribute("aria-pressed", String(modelHandControl)); $("modelHandControlBtn").textContent = modelHandControl ? "✋ 关闭 3D 手势" : "✋ 启用 3D 手势"; $("modelHandCursor").classList.remove("visible"); updateTransformAttachment(); if (modelHandControl) { modelOrbit.enabled = false; setStatus("3D 手势已启用：" + (primaryHand === "Right" ? "右" : "左") + "手 V 字选件、单指移动、握拳旋转、捏合缩放、竖拇指切整体；张掌或放松停止。" + (modelTwoHandMode ? " 双手高级模式已开启。" : ""), "info"); } else { modelOrbit.enabled = true; setStatus("3D 手势已关闭，可使用鼠标和变换手柄操作。", "info"); } updateModelGestureUI(); });
