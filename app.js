@@ -107,6 +107,7 @@ let modelHandControl = false;
 let lastModelHandTip = null;
 let modelHandGesture = null;
 let modelHandPose = "idle";
+let modelSelectGraceUntil = 0;
 let modelPoseLostAt = 0;
 let modelGestureStart = null;
 let modelGestureCandidate = null;
@@ -910,10 +911,10 @@ function classifyModelHandPose(landmarks, pinching) {
   // Perspective and hand tilt can make a truly straight finger measure below
   // 138 degrees. Use a tolerant extension threshold here and keep the V pose
   // distinct by requiring the ring and little fingers to remain folded.
-  const index = fingerExtensionAngle(landmarks, 5, 6, 8) > 120;
-  const middle = fingerExtensionAngle(landmarks, 9, 10, 12) > 120;
-  const ring = fingerExtensionAngle(landmarks, 13, 14, 16) > 120;
-  const pinky = fingerExtensionAngle(landmarks, 17, 18, 20) > 120;
+  const index = fingerExtensionAngle(landmarks, 5, 6, 8) > 112;
+  const middle = fingerExtensionAngle(landmarks, 9, 10, 12) > 112;
+  const ring = fingerExtensionAngle(landmarks, 13, 14, 16) > 135;
+  const pinky = fingerExtensionAngle(landmarks, 17, 18, 20) > 135;
   // Thumb angle changes sharply with camera orientation. Its tip distance from
   // the index MCP is a more stable indication that the thumb points up/out.
   const palmScale = Math.hypot(landmarks[0].x - landmarks[9].x, landmarks[0].y - landmarks[9].y, (landmarks[0].z || 0) - (landmarks[9].z || 0));
@@ -923,7 +924,9 @@ function classifyModelHandPose(landmarks, pinching) {
   const fistClosed = !index && !middle && !ring && !pinky;
   // Selection wins over pinch so a V pose is not stolen by a transient thumb
   // landmark error. A raised thumb is a one-shot target-scope command.
-  if (index && middle && !ring && !pinky) return "select";
+  const vGap = Math.hypot(landmarks[8].x - landmarks[12].x, landmarks[8].y - landmarks[12].y);
+  const vPose = index && middle && !ring && !pinky && vGap > palmScale * .18;
+  if (vPose) return "select";
   // A thumb command must be unambiguous: the thumb is extended while all four
   // fingers are folded.  Using `>= 3` made an index+thumb pose look like a
   // whole-model switch for a few frames while the V gesture was settling.
@@ -939,12 +942,12 @@ function classifyModelHandPose(landmarks, pinching) {
 }
 
 function modelPoseConfirmMs(pose) {
-  return ({ idle: 120, scale: 140, move: 90, rotate: 170, select: 140, whole: 180 })[pose] ?? 150;
+  return ({ idle: 120, scale: 140, move: 90, rotate: 170, select: 85, whole: 180 })[pose] ?? 150;
 }
 
 function modelPoseConfirmFrames(pose) {
   if (pose === "move") return 3;
-  if (pose === "select") return 4;
+  if (pose === "select") return 2;
   return pose === "whole" ? 5 : 4;
 }
 
@@ -1023,7 +1026,7 @@ function applyTwoHandModelControl(primaryLandmarks, secondaryLandmarks, timestam
     target.position.y -= moveY * 150 * gain;
   }
   if (Math.abs(distanceDelta) > .0015) {
-    target.scale.multiplyScalar(Math.max(.94, Math.min(1.06, Math.exp(distanceDelta * 2.8 * gain))));
+    target.scale.multiplyScalar(Math.max(.90, Math.min(1.11, Math.exp(distanceDelta * 4.2 * gain))));
   }
   if (Math.abs(angleDelta) > .006) {
     const screenNormal = modelCamera.getWorldDirection(new THREE.Vector3()).negate();
@@ -1044,6 +1047,11 @@ function applyModelHandControl(landmarks, timestamp, pose = "idle") {
   // user can switch from scaling to rotation without the old pinch state
   // swallowing the fist gesture.
   if (modelHandPose === "scale" && pose !== "scale" && pose !== "idle" && pose !== "rotate") pose = "idle";
+  // Keep a confirmed V selection alive through a noisy landmark frame. The
+  // middle finger can briefly fall below the extension threshold while the
+  // hand moves, which otherwise interrupts the hover timer or changes mode.
+  if (modelHandPose === "select" && (pose === "idle" || pose === "move") && timestamp < modelSelectGraceUntil) pose = "select";
+  if (pose === "select") modelSelectGraceUntil = timestamp + 140;
   // Keep the model cursor more responsive than the drawing cursor: blend a
   // little raw fingertip into the filtered point so fast movement does not lag
   // behind, while the One Euro filter still removes visible jitter.
@@ -1194,7 +1202,7 @@ function applyModelHandControl(landmarks, timestamp, pose = "idle") {
     rotateTargetAroundWorldAxis(target, screenUp, Math.max(-.30, Math.min(.30, -dx * 14.0 * gain)));
     rotateTargetAroundWorldAxis(target, screenRight, Math.max(-.27, Math.min(.27, dy * 12.5 * gain)));
   }
-  if (pose === "scale") target.scale.multiplyScalar(Math.max(.8, Math.min(1.25, Math.exp(-dy * 3.2 * gain))));
+  if (pose === "scale") target.scale.multiplyScalar(Math.max(.74, Math.min(1.35, Math.exp(-dy * 5.8 * gain))));
   if (pose === "rotate" || pose === "scale") constrainModelTargetToViewport(target);
   $("modelViewerHint").textContent = pose === "scale"
     ? "正在捏合缩放 · 掌心上移放大、下移缩小；松开后可再次捏合继续调整"
