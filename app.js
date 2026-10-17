@@ -320,18 +320,48 @@ function projectModelCenter(target) {
   if (bounds.isEmpty()) return null;
   const center = bounds.getCenter(new THREE.Vector3());
   const ndc = center.clone().project(modelCamera);
-  return { world: center, ndc };
+  // Keep the projected half-size so hand translation and later transforms can
+  // keep the complete object inside the visible viewport, rather than only
+  // keeping its origin/center on screen.
+  const corners = [
+    new THREE.Vector3(bounds.min.x, bounds.min.y, bounds.min.z),
+    new THREE.Vector3(bounds.min.x, bounds.min.y, bounds.max.z),
+    new THREE.Vector3(bounds.min.x, bounds.max.y, bounds.min.z),
+    new THREE.Vector3(bounds.min.x, bounds.max.y, bounds.max.z),
+    new THREE.Vector3(bounds.max.x, bounds.min.y, bounds.min.z),
+    new THREE.Vector3(bounds.max.x, bounds.min.y, bounds.max.z),
+    new THREE.Vector3(bounds.max.x, bounds.max.y, bounds.min.z),
+    new THREE.Vector3(bounds.max.x, bounds.max.y, bounds.max.z)
+  ];
+  const projectedCorners = corners.map((corner) => corner.project(modelCamera));
+  const minX = Math.min(...projectedCorners.map((corner) => corner.x));
+  const maxX = Math.max(...projectedCorners.map((corner) => corner.x));
+  const minY = Math.min(...projectedCorners.map((corner) => corner.y));
+  const maxY = Math.max(...projectedCorners.map((corner) => corner.y));
+  return { world: center, ndc, halfX: (maxX - minX) * .5, halfY: (maxY - minY) * .5 };
 }
 
 function placeModelCenterAtNdc(target, desiredNdc, projected = projectModelCenter(target)) {
   if (!projected || !target?.parent || !modelCamera) return false;
-  const desiredWorld = desiredNdc.clone().setZ(projected.ndc.z).unproject(modelCamera);
+  const safeMargin = .06;
+  const maxCenterX = 1 - safeMargin - Math.max(0, projected.halfX || 0);
+  const maxCenterY = 1 - safeMargin - Math.max(0, projected.halfY || 0);
+  const clampedNdc = desiredNdc.clone();
+  clampedNdc.x = maxCenterX > 0 ? Math.max(-maxCenterX, Math.min(maxCenterX, clampedNdc.x)) : 0;
+  clampedNdc.y = maxCenterY > 0 ? Math.max(-maxCenterY, Math.min(maxCenterY, clampedNdc.y)) : 0;
+  const desiredWorld = clampedNdc.setZ(projected.ndc.z).unproject(modelCamera);
   const worldDelta = desiredWorld.sub(projected.world);
   const parentInverse = target.parent.matrixWorld.clone().invert();
   const localCenter = projected.world.clone().applyMatrix4(parentInverse);
   const localDesired = projected.world.clone().add(worldDelta).applyMatrix4(parentInverse);
   target.position.add(localDesired.sub(localCenter));
   return true;
+}
+
+function constrainModelTargetToViewport(target) {
+  const projected = projectModelCenter(target);
+  if (!projected) return false;
+  return placeModelCenterAtNdc(target, projected.ndc, projected);
 }
 
 function moveModelCenterWithFinger(target, tip, anchor = { x: 0, y: 0 }, timestamp = performance.now()) {
@@ -1036,9 +1066,12 @@ function applyModelHandControl(landmarks, timestamp, pose = "idle") {
     rotateTargetAroundWorldAxis(target, screenRight, Math.max(-.27, Math.min(.27, dy * 12.5 * gain)));
   }
   if (pose === "scale") target.scale.multiplyScalar(Math.max(.8, Math.min(1.25, Math.exp(-dy * 3.2 * gain))));
+  if (pose === "rotate" || pose === "scale") constrainModelTargetToViewport(target);
   $("modelViewerHint").textContent = pose === "scale"
-    ? "正在捏合缩放 · 手掌上下移动调大小；松开后可再次捏合继续调整"
-    : "正在" + modelPoseLabel(pose) + " · " + (modelTargetScope === "whole" ? "整体模型" : "选中部件") + " · 张掌或放松停止";
+    ? "正在捏合缩放 · 掌心上移放大、下移缩小；松开后可再次捏合继续调整"
+    : pose === "rotate"
+      ? "正在握拳旋转 · 左右绕屏幕 Y 轴、上下绕屏幕 X 轴；张掌或放松停止"
+      : "正在" + modelPoseLabel(pose) + " · " + (modelTargetScope === "whole" ? "整体模型" : "选中部件") + " · 张掌或放松停止";
   updateSelectedPartLabel();
 }
 
