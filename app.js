@@ -920,7 +920,8 @@ function updateModelGestureUI() {
   const state = $("modelGestureState"); const strip = state?.closest(".model-gesture-strip");
   if (!state) return;
   const targetName = modelTargetScope === "whole" ? "整体模型" : "选中部件";
-  state.textContent = !modelHandControl ? "鼠标 / 变换手柄" : (modelTwoHandActive ? "双手" : (primaryHand === "Right" ? "右手" : "左手")) + "主控 · " + targetName + " · " + (modelTwoHandActive ? modelPoseLabel("twoHand") : modelPoseLabel());
+  const poseLabel = modelGestureCandidate === "move" && modelHandPose !== "move" ? "单指移动识别中…" : modelTwoHandActive ? modelPoseLabel("twoHand") : modelPoseLabel();
+  state.textContent = !modelHandControl ? "鼠标 / 变换手柄" : (modelTwoHandActive ? "双手" : (primaryHand === "Right" ? "右手" : "左手")) + "主控 · " + targetName + " · " + poseLabel;
   strip?.classList.toggle("active", modelHandControl);
   document.body.classList.toggle("model-hand-control-active", modelHandControl && activeWorkspace === "model");
 }
@@ -931,8 +932,11 @@ function classifyModelHandPose(landmarks, pinching) {
   // distinct by requiring the ring and little fingers to remain folded.
   const index = fingerExtensionAngle(landmarks, 5, 6, 8) > 112;
   const middle = fingerExtensionAngle(landmarks, 9, 10, 12) > 112;
-  const ring = fingerExtensionAngle(landmarks, 13, 14, 16) > 135;
-  const pinky = fingerExtensionAngle(landmarks, 17, 18, 20) > 135;
+  // Ring and little fingers often look partly extended in a side-on pointing
+  // pose. Treat only clearly straight fingers as extended so a relaxed curl
+  // does not block the single-index move gesture.
+  const ring = fingerExtensionAngle(landmarks, 13, 14, 16) > 150;
+  const pinky = fingerExtensionAngle(landmarks, 17, 18, 20) > 150;
   // Thumb angle changes sharply with camera orientation. Its tip distance from
   // the index MCP is a more stable indication that the thumb points up/out.
   const palmScale = Math.hypot(landmarks[0].x - landmarks[9].x, landmarks[0].y - landmarks[9].y, (landmarks[0].z || 0) - (landmarks[9].z || 0));
@@ -955,16 +959,20 @@ function classifyModelHandPose(landmarks, pinching) {
   // for a few frames and make the model keep scaling instead of rotating.
   if (fistClosed) return "rotate";
   if (pinching) return "scale";
-  if (index && !middle && !ring && !pinky) return "move";
+  // A deliberate pointing pose has the index extended and most of the other
+  // fingers folded. This tolerates one noisy landmark on a curled finger,
+  // while a clearly separated index+middle V was returned as select above.
+  const foldedNonIndexCount = [middle, ring, pinky].filter((extended) => !extended).length;
+  if (index && foldedNonIndexCount >= 2) return "move";
   return "idle";
 }
 
 function modelPoseConfirmMs(pose) {
-  return ({ idle: 120, scale: 140, move: 90, rotate: 170, select: 85, whole: 180 })[pose] ?? 150;
+  return ({ idle: 120, scale: 140, move: 35, rotate: 170, select: 85, whole: 180 })[pose] ?? 150;
 }
 
 function modelPoseConfirmFrames(pose) {
-  if (pose === "move") return 3;
+  if (pose === "move") return 2;
   if (pose === "select") return 2;
   return pose === "whole" ? 5 : 4;
 }
@@ -1114,7 +1122,10 @@ function applyModelHandControl(landmarks, timestamp, pose = "idle") {
   }
   if (modelHandPose !== pose) {
     modelHandGesture = false; lastModelHandTip = pose === "scale" ? zoomPoint : pose === "rotate" ? rotatePoint : tip; modelMoveTransition = null; modelMoveInput = null;
-    $("modelViewerHint").textContent = "手势切换中…保持目标姿势片刻即可操作。";
+    $("modelViewerHint").textContent = pose === "move"
+      ? "正在识别单指移动…食指伸出，其他手指自然收拢即可"
+      : "手势切换中…保持目标姿势片刻即可操作。";
+    updateModelGestureUI();
     return;
   }
   if (pose === "select") {
