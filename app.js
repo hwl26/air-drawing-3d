@@ -91,6 +91,8 @@ let modelSelectionCommitted = false;
 let modelRoot = null;
 let modelAnimationId = null;
 let selectedModelObject = null;
+let selectedModelObjects = new Set();
+let modelSelectionGroup = null;
 let modelParts = [];
 let transformMode = "translate";
 let modelHandControl = false;
@@ -487,17 +489,72 @@ function disposeModelPart(part) {
   modelRoot?.remove(part.object);
 }
 
+function getValidSelectedModelObjects() {
+  const valid = new Set(modelParts.map((part) => part.object));
+  return [...selectedModelObjects].filter((object) => valid.has(object) && object.visible);
+}
+
+function updateModelSelectionGroup() {
+  if (!modelRoot) return;
+  if (!modelSelectionGroup) {
+    modelSelectionGroup = new THREE.Group();
+    modelSelectionGroup.name = "AirDrawingMultiSelection";
+    modelRoot.add(modelSelectionGroup);
+  }
+  [...modelSelectionGroup.children].forEach((child) => modelRoot.attach(child));
+  modelSelectionGroup.position.set(0, 0, 0);
+  modelSelectionGroup.quaternion.identity();
+  modelSelectionGroup.scale.setScalar(1);
+  const objects = getValidSelectedModelObjects();
+  if (objects.length < 2) { modelSelectionGroup.visible = false; return; }
+  const bounds = new THREE.Box3(); objects.forEach((object) => bounds.expandByObject(object));
+  modelSelectionGroup.position.copy(modelRoot.worldToLocal(bounds.getCenter(new THREE.Vector3())));
+  objects.forEach((object) => modelSelectionGroup.attach(object));
+  modelSelectionGroup.visible = true;
+  modelSelectionGroup.updateMatrixWorld(true);
+}
+
+function selectModelObjects(objects, { additive = false } = {}) {
+  const valid = new Set(modelParts.map((part) => part.object));
+  const next = additive ? new Set(selectedModelObjects) : new Set();
+  objects.forEach((object) => { if (valid.has(object)) next.has(object) ? next.delete(object) : next.add(object); });
+  selectedModelObjects = next;
+  selectedModelObject = getValidSelectedModelObjects()[0] || null;
+  updateModelSelectionGroup(); updateTransformAttachment();
+  showModelSelectionHelper(getModelGestureTarget() || selectedModelObject);
+  updateSelectedPartLabel(); updateScenePartList(); updateModelGestureUI();
+}
+
+function selectAllModelObjects() {
+  selectedModelObjects = new Set(modelParts.filter((part) => part.object.visible).map((part) => part.object));
+  selectedModelObject = getValidSelectedModelObjects()[0] || null;
+  updateModelSelectionGroup(); updateTransformAttachment();
+  showModelSelectionHelper(getModelGestureTarget() || selectedModelObject);
+  updateSelectedPartLabel(); updateScenePartList(); updateModelGestureUI();
+}
+
+function clearModelSelection() {
+  selectedModelObjects.clear(); selectedModelObject = null;
+  updateModelSelectionGroup(); updateTransformAttachment(); showModelSelectionHelper(null);
+  updateSelectedPartLabel(); updateScenePartList(); updateModelGestureUI();
+}
+
 function updateScenePartList() {
   const host = $("scenePartList"); if (!host) return; host.replaceChildren();
   if (!modelParts.length) { host.innerHTML = '<div class="scene-empty">添加一个或多个部件后，可在此选择、隐藏或拆分观察。</div>'; }
   modelParts.forEach((part) => {
-    const row = document.createElement("div"); row.className = `scene-part-row${part.object === selectedModelObject ? " selected" : ""}`;
-    const select = document.createElement("button"); select.className = "scene-part-name"; select.type = "button"; select.textContent = part.name; select.title = `${part.id} · 点击选中`;
-    select.addEventListener("click", () => selectModelObject(part.object));
+    const row = document.createElement("div"); row.className = `scene-part-row${selectedModelObjects.has(part.object) ? " selected" : ""}`;
+    const select = document.createElement("button"); select.className = "scene-part-name"; select.type = "button"; select.textContent = part.name; select.title = `${part.id} · 点击选中；按住 Ctrl/⌘ 可多选`;
+    select.addEventListener("click", (event) => {
+      if (event.ctrlKey || event.metaKey || event.shiftKey) selectModelObjects([part.object], { additive: true });
+      else selectModelObject(part.object);
+    });
     const visibility = document.createElement("button"); visibility.className = "scene-visibility"; visibility.type = "button"; visibility.textContent = part.object.visible ? "显" : "隐"; visibility.title = "显示/隐藏部件"; visibility.addEventListener("click", () => { part.object.visible = !part.object.visible; visibility.textContent = part.object.visible ? "显" : "隐"; });
     row.append(select, visibility); host.append(row);
   });
   $("scenePartCount").textContent = `${modelParts.length} 个`; $("removeAllPartsBtn").disabled = !modelParts.length; $("framePartBtn").disabled = !selectedModelObject;
+  if ($("selectAllModelBtn")) $("selectAllModelBtn").disabled = modelParts.length < 2;
+  if ($("clearModelSelectionBtn")) $("clearModelSelectionBtn").disabled = selectedModelObjects.size < 2;
   const selectedRecord = modelParts.find((item) => item.object === selectedModelObject);
   $("explodePartBtn").disabled = !selectedRecord;
   $("explodePartBtn").textContent = selectedRecord?.exploded ? "合并部件" : "拆分观察";
@@ -508,8 +565,9 @@ function updateScenePartList() {
 }
 
 function selectModelObject(object) {
-  selectedModelObject = object; updateTransformAttachment();
-  showModelSelectionHelper(object);
+  selectedModelObjects = object ? new Set([object]) : new Set();
+  selectedModelObject = object || null; updateModelSelectionGroup(); updateTransformAttachment();
+  showModelSelectionHelper(getModelGestureTarget() || object);
   updateSelectedPartLabel(); updateScenePartList(); updateModelGestureUI();
 }
 
@@ -550,7 +608,9 @@ function setModelTargetScope(scope) {
 }
 
 function getModelGestureTarget() {
-  return modelTargetScope === "whole" ? (modelParts.length ? modelRoot : null) : selectedModelObject;
+  if (modelTargetScope === "whole") return modelParts.length ? modelRoot : null;
+  const selected = getValidSelectedModelObjects();
+  return selected.length > 1 ? modelSelectionGroup : selectedModelObject;
 }
 
 function updateTransformAttachment() {
@@ -566,7 +626,12 @@ function updateTransformAttachment() {
   modelTransform.setMode(transformMode);
 }
 
-function updateSelectedPartLabel() { const part = modelParts.find((item) => item.object === selectedModelObject); $("selectedPartName").textContent = part ? `${part.name} · ${part.id}` : "尚未加载模型"; }
+function updateSelectedPartLabel() {
+  const selected = getValidSelectedModelObjects();
+  if (selected.length > 1) { $("selectedPartName").textContent = `已选中 ${selected.length} 个部件 · 可整体变换`; return; }
+  const part = modelParts.find((item) => item.object === selectedModelObject);
+  $("selectedPartName").textContent = part ? `${part.name} · ${part.id}` : "尚未加载模型";
+}
 
 function frameModelObjects(objects) {
   const visible = objects.filter((object) => object?.visible);
@@ -604,7 +669,7 @@ async function loadCatalogParts(parts, { replace = false, label = "选中部件"
   createModelViewer();
   $("loadCatalogBtn").disabled = true; $("addModelModuleBtn").disabled = true; $("replaceModelModuleBtn").disabled = true;
   if (replace && modelParts.length) {
-    modelParts.forEach(disposeModelPart); modelParts = []; selectedModelObject = null; resetModelAssemblyTransform(); modelTransform?.detach();
+    modelParts.forEach(disposeModelPart); modelParts = []; selectedModelObjects.clear(); selectedModelObject = null; modelSelectionGroup?.clear(); resetModelAssemblyTransform(); modelTransform?.detach();
   }
   setStatus(`正在加载${label} ${parts.length} 个 OBJ 部件…`, "info");
   try {
@@ -615,6 +680,7 @@ async function loadCatalogParts(parts, { replace = false, label = "选中部件"
     if (!modelParts.length) $("modelViewerPlaceholder")?.classList.remove("hidden");
     const loadedKeys = new Set(parts.map((part) => part.key || part.file));
     const moduleObjects = modelParts.filter((part) => loadedKeys.has(part.key)).map((part) => part.object);
+    if (moduleObjects.length > 1) selectModelObjects(moduleObjects);
     frameModelObjects(moduleObjects);
     updateScenePartList(); updateSelectedPartLabel();
     setStatus(`${replace ? "已清空旧场景并加载" : "已加入"} ${loaded} 个${label}。启用 3D 手势后可用 V 字选件、单指移动、握拳旋转、捏合缩放。`, "info");
@@ -1895,11 +1961,13 @@ $("modelTwoHandMode").addEventListener("change", (event) => {
 $("resetViewBtn").addEventListener("click", () => { fitModelScene(); setStatus("已重置模型视角与整体比例。", "info"); });
 $("resetModelTargetBtn").addEventListener("click", resetModelTarget);
 $("resetAllModelBtn").addEventListener("click", resetAllModelParts);
+$("selectAllModelBtn").addEventListener("click", () => { selectAllModelObjects(); setStatus(`已全选 ${selectedModelObjects.size} 个可见部件；现在可整体移动、旋转或缩放。`, "info"); });
+$("clearModelSelectionBtn").addEventListener("click", () => { const first = getValidSelectedModelObjects()[0] || null; selectModelObject(first); setStatus(first ? "已退出多选，当前只操作一个部件。" : "已取消部件选择。", "info"); });
 $("saveModelPoseBtn").addEventListener("click", saveModelPose);
 $("restoreModelPoseBtn").addEventListener("click", restoreSavedModelPose);
 $("framePartBtn").addEventListener("click", frameSelectedModel);
 $("explodePartBtn").addEventListener("click", explodeSelectedModel);
-$("removeAllPartsBtn").addEventListener("click", () => { modelParts.forEach(disposeModelPart); modelParts = []; selectedModelObject = null; showModelSelectionHelper(null); resetModelAssemblyTransform(); modelTransform?.detach(); $("modelViewerPlaceholder")?.classList.remove("hidden"); updateScenePartList(); updateSelectedPartLabel(); updateModelGestureUI(); setStatus("已移除场景中的全部部件。", "info"); });
+$("removeAllPartsBtn").addEventListener("click", () => { modelParts.forEach(disposeModelPart); modelParts = []; selectedModelObjects.clear(); selectedModelObject = null; modelSelectionGroup?.clear(); showModelSelectionHelper(null); resetModelAssemblyTransform(); modelTransform?.detach(); $("modelViewerPlaceholder")?.classList.remove("hidden"); updateScenePartList(); updateSelectedPartLabel(); updateModelGestureUI(); setStatus("已移除场景中的全部部件。", "info"); });
 $("modelHandControlBtn").addEventListener("click", () => { modelHandControl = !modelHandControl; lastModelHandTip = null; modelMoveAnchor = null; modelHandGesture = false; modelHandPose = "idle"; modelGestureCandidate = null; modelGestureCandidateFrames = 0; modelSelectionCommitted = false; resetTwoHandControl(); $("modelHandControlBtn").setAttribute("aria-pressed", String(modelHandControl)); $("modelHandControlBtn").textContent = modelHandControl ? "✋ 关闭 3D 手势" : "✋ 启用 3D 手势"; $("modelHandCursor").classList.remove("visible"); updateTransformAttachment(); if (modelHandControl) { modelOrbit.enabled = false; setStatus("3D 手势已启用：" + (primaryHand === "Right" ? "右" : "左") + "手 V 字选件、单指移动、握拳旋转、捏合缩放、竖拇指切整体；张掌或放松停止。" + (modelTwoHandMode ? " 双手高级模式已开启。" : ""), "info"); } else { modelOrbit.enabled = true; setStatus("3D 手势已关闭，可使用鼠标和变换手柄操作。", "info"); } updateModelGestureUI(); });
 $("drawToggleBtn").addEventListener("click", () => { drawEnabled = !drawEnabled; if (!drawEnabled) finishStroke(); $("drawToggleBtn").setAttribute("aria-pressed", String(drawEnabled)); $("drawToggleLabel").textContent = drawEnabled ? "绘画已启用" : "绘画已暂停"; setStatus(drawEnabled ? "绘画模式已启用。" : "绘画模式已暂停。", "info"); });
 $("undoBtn").addEventListener("click", () => { finishStroke(); strokes.pop(); selectedStroke = null; redrawAll(); setStatus(strokes.length ? "已撤销上一笔。" : "没有可撤销的笔画。"); });
