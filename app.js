@@ -121,6 +121,7 @@ let modelDeltaY = 0;
 let modelGestureTimestamp = 0;
 let modelMoveAnchor = null;
 let modelMoveTransition = null;
+let modelMoveInput = null;
 let modelScaleJustReleased = false;
 let modelTwoHandMode = false;
 let modelTwoHandActive = false;
@@ -389,13 +390,30 @@ function moveModelCenterWithFinger(target, tip, anchor = { x: 0, y: 0 }, timesta
   const projected = projectModelCenter(target);
   if (!projected) return false;
   const desiredNdc = new THREE.Vector3(tip.x * 2 - 1 + anchor.x, 1 - tip.y * 2 + anchor.y, projected.ndc.z);
-  const screenDistance = Math.hypot(desiredNdc.x - projected.ndc.x, desiredNdc.y - projected.ndc.y);
-  const MODEL_MOVE_DIRECT_LIMIT = .30; // ordinary movement follows the fingertip immediately
-  const MODEL_MOVE_MAX_MS = 190; // only very large jumps use a short smoothing arc
+  const MODEL_MOVE_FAST_SPEED_THRESHOLD = 2.6; // normalized viewport widths per second
+  const MODEL_MOVE_ARC_MIN_DISTANCE = .055; // ignore tiny high-frequency landmark jitter
+  const MODEL_MOVE_MAX_MS = 190; // fast hand movement gets a short smoothing arc
   const MODEL_MOVE_MIN_MS = 45;
 
-  if (modelMoveTransition && modelMoveTransition.target !== target) modelMoveTransition = null;
-  if (!modelMoveTransition && screenDistance > MODEL_MOVE_DIRECT_LIMIT) {
+  if ((modelMoveTransition && modelMoveTransition.target !== target) || (modelMoveInput && modelMoveInput.target !== target)) {
+    modelMoveTransition = null;
+    modelMoveInput = null;
+  }
+  const elapsedMs = modelMoveInput ? timestamp - modelMoveInput.timestamp : 0;
+  const inputDistance = modelMoveInput ? Math.hypot(desiredNdc.x - modelMoveInput.point.x, desiredNdc.y - modelMoveInput.point.y) : 0;
+  const inputSpeed = elapsedMs > 0 ? inputDistance / (elapsedMs / 1000) : 0;
+  const fastMove = Boolean(modelMoveInput && elapsedMs > 0 && inputSpeed > MODEL_MOVE_FAST_SPEED_THRESHOLD && inputDistance > MODEL_MOVE_ARC_MIN_DISTANCE);
+  modelMoveInput = { target, point: desiredNdc.clone(), timestamp };
+
+  // Normal and medium-speed motion is position-mapped every frame. Cancel a
+  // pending arc as soon as the hand slows down so the model never trails a
+  // deliberate, continuous finger movement.
+  if (!fastMove) {
+    modelMoveTransition = null;
+    return placeModelCenterAtNdc(target, desiredNdc, projected);
+  }
+
+  if (!modelMoveTransition) {
     const start = projected.ndc.clone();
     const end = desiredNdc.clone();
     const distance = Math.hypot(end.x - start.x, end.y - start.y);
@@ -1069,7 +1087,7 @@ function applyModelHandControl(landmarks, timestamp, pose = "idle") {
   const cursor = $("modelHandCursor");
   if (!tip || !modelHandControl) {
     cursor.classList.remove("visible"); cursor.removeAttribute("data-pose");
-    lastModelHandTip = null; modelHandGesture = false; modelHandPose = "idle"; modelGestureCandidate = null; modelGestureCandidateFrames = 0; modelMoveAnchor = null; modelMoveTransition = null;
+    lastModelHandTip = null; modelHandGesture = false; modelHandPose = "idle"; modelGestureCandidate = null; modelGestureCandidateFrames = 0; modelMoveAnchor = null; modelMoveTransition = null; modelMoveInput = null;
     modelHoverPart = null; modelSelectionCommitted = false; modelPoseLostAt = timestamp;
     resetTwoHandControl();
     return;
@@ -1085,7 +1103,7 @@ function applyModelHandControl(landmarks, timestamp, pose = "idle") {
     if (pose === "idle" && previousPose === "scale") modelScaleJustReleased = true;
     if (pose === "scale") modelScaleJustReleased = false;
     modelGestureStart = { x: tip.x, y: tip.y, timestamp };
-    modelMoveAnchor = null; modelMoveTransition = null;
+    modelMoveAnchor = null; modelMoveTransition = null; modelMoveInput = null;
     lastModelHandTip = pose === "scale" ? zoomPoint : pose === "rotate" ? rotatePoint : tip; modelHandGesture = false; modelDeltaX = 0; modelDeltaY = 0; modelGestureTimestamp = timestamp;
     modelHoverPart = null; modelHoverSince = timestamp; modelSelectionCommitted = false;
     if (pose === "select" && previousPose !== "select") modelSelectEntryId += 1;
@@ -1095,7 +1113,7 @@ function applyModelHandControl(landmarks, timestamp, pose = "idle") {
     updateModelGestureUI();
   }
   if (modelHandPose !== pose) {
-    modelHandGesture = false; lastModelHandTip = pose === "scale" ? zoomPoint : pose === "rotate" ? rotatePoint : tip; modelMoveTransition = null;
+    modelHandGesture = false; lastModelHandTip = pose === "scale" ? zoomPoint : pose === "rotate" ? rotatePoint : tip; modelMoveTransition = null; modelMoveInput = null;
     $("modelViewerHint").textContent = "手势切换中…保持目标姿势片刻即可操作。";
     return;
   }
@@ -1139,18 +1157,18 @@ function applyModelHandControl(landmarks, timestamp, pose = "idle") {
   }
   cursor.style.removeProperty("--select-progress");
   if (pose === "whole") {
-    modelHandGesture = false; lastModelHandTip = tip; modelMoveAnchor = null; modelMoveTransition = null;
+    modelHandGesture = false; lastModelHandTip = tip; modelMoveAnchor = null; modelMoveTransition = null; modelMoveInput = null;
     $("modelViewerHint").textContent = modelParts.length ? "✓ 整体模型已切换为操作目标 · 单指移动、握拳旋转、捏合缩放" : "整体目标已选 · 请先加载模型";
     updateModelGestureUI(); return;
   }
   if (pose === "idle") {
-    modelHandGesture = false; lastModelHandTip = tip; modelDeltaX = 0; modelDeltaY = 0; modelMoveAnchor = null; modelMoveTransition = null;
+    modelHandGesture = false; lastModelHandTip = tip; modelDeltaX = 0; modelDeltaY = 0; modelMoveAnchor = null; modelMoveTransition = null; modelMoveInput = null;
     $("modelViewerHint").textContent = modelScaleJustReleased ? "缩放已暂停 · 放松手片刻，再次捏合并上下移动可继续调整" : modelTargetScope === "part" && !selectedModelObject ? "V 字手势选中部件，或用鼠标列表选择" : "当前目标：" + (modelTargetScope === "whole" ? "整体模型" : "选中部件") + " · 做出手势开始操作，放松手指停止";
     updateModelGestureUI(); return;
   }
   const target = getModelGestureTarget();
   if (!target) {
-    modelHandGesture = false; lastModelHandTip = tip; modelMoveTransition = null;
+    modelHandGesture = false; lastModelHandTip = tip; modelMoveTransition = null; modelMoveInput = null;
     $("modelViewerHint").textContent = "请先用 V 字手势选中部件，或举起拇指切换到整体模型。";
     updateModelGestureUI(); return;
   }
