@@ -930,8 +930,14 @@ function classifyModelHandPose(landmarks, pinching) {
   // Perspective and hand tilt can make a truly straight finger measure below
   // 138 degrees. Use a tolerant extension threshold here and keep the V pose
   // distinct by requiring the ring and little fingers to remain folded.
+  const palmScale = Math.hypot(landmarks[0].x - landmarks[9].x, landmarks[0].y - landmarks[9].y, (landmarks[0].z || 0) - (landmarks[9].z || 0));
+  const middleTipReach = Math.hypot(landmarks[12].x - landmarks[9].x, landmarks[12].y - landmarks[9].y, (landmarks[12].z || 0) - (landmarks[9].z || 0));
   const index = fingerExtensionAngle(landmarks, 5, 6, 8) > 112;
-  const middle = fingerExtensionAngle(landmarks, 9, 10, 12) > 112;
+  // An angle alone can call a curled middle finger "extended" when the hand
+  // is viewed obliquely. A real V also carries its middle fingertip well past
+  // the middle MCP relative to palm length; this keeps index-pointing from
+  // being mistaken for selection.
+  const middle = fingerExtensionAngle(landmarks, 9, 10, 12) > 112 && middleTipReach > palmScale * .78;
   // Ring and little fingers often look partly extended in a side-on pointing
   // pose. Treat only clearly straight fingers as extended so a relaxed curl
   // does not block the single-index move gesture.
@@ -939,7 +945,6 @@ function classifyModelHandPose(landmarks, pinching) {
   const pinky = fingerExtensionAngle(landmarks, 17, 18, 20) > 150;
   // Thumb angle changes sharply with camera orientation. Its tip distance from
   // the index MCP is a more stable indication that the thumb points up/out.
-  const palmScale = Math.hypot(landmarks[0].x - landmarks[9].x, landmarks[0].y - landmarks[9].y, (landmarks[0].z || 0) - (landmarks[9].z || 0));
   const thumbOpen = Math.hypot(landmarks[4].x - landmarks[5].x, landmarks[4].y - landmarks[5].y, (landmarks[4].z || 0) - (landmarks[5].z || 0)) > palmScale * .72;
   const thumbUp = landmarks[4].y < landmarks[3].y + .06;
   const foldedCount = [index, middle, ring, pinky].filter((extended) => !extended).length;
