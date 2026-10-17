@@ -88,6 +88,13 @@ let screenAxisVisible = true;
 let modelHoverPart = null;
 let modelHoverSince = 0;
 let modelSelectionCommitted = false;
+let modelPickCandidates = [];
+let modelPickIndex = 0;
+let modelPickKey = "";
+let modelSelectEntryId = 0;
+let modelSelectHandledEntry = 0;
+let modelLastSelectPoint = null;
+let modelLastSelectKey = "";
 let modelRoot = null;
 let modelAnimationId = null;
 let selectedModelObject = null;
@@ -583,17 +590,26 @@ function showModelSelectionHelper(object) {
   modelSelectionHelper.visible = true;
 }
 
-function raycastModelPart(pointer) {
+function raycastModelParts(pointer) {
   if (!modelRaycaster || !modelCamera) return null;
   modelRaycaster.setFromCamera(pointer, modelCamera);
   const visibleParts = modelParts.filter((part) => part.object.visible).map((part) => part.object);
   const hits = modelRaycaster.intersectObjects(visibleParts, true);
+  const candidates = [];
+  const seen = new Set();
   for (const hit of hits) {
     let target = hit.object;
     while (target && !target.userData.modelPart) target = target.parent;
-    if (target) return target;
+    if (target && !seen.has(target)) {
+      seen.add(target);
+      candidates.push({ target, distance: hit.distance });
+    }
   }
-  return null;
+  return candidates.sort((a, b) => a.distance - b.distance).map((item) => item.target);
+}
+
+function raycastModelPart(pointer) {
+  return raycastModelParts(pointer)?.[0] || null;
 }
 
 function setModelTargetScope(scope) {
@@ -1058,6 +1074,7 @@ function applyModelHandControl(landmarks, timestamp, pose = "idle") {
     modelMoveAnchor = null; modelMoveTransition = null;
     lastModelHandTip = pose === "scale" ? zoomPoint : pose === "rotate" ? rotatePoint : tip; modelHandGesture = false; modelDeltaX = 0; modelDeltaY = 0; modelGestureTimestamp = timestamp;
     modelHoverPart = null; modelHoverSince = timestamp; modelSelectionCommitted = false;
+    if (pose === "select" && previousPose !== "select") modelSelectEntryId += 1;
     modelPoseLostAt = pose === "idle" ? timestamp : 0;
     if (pose === "select") setModelTargetScope("part");
     if (pose === "whole") setModelTargetScope("whole");
@@ -1070,7 +1087,22 @@ function applyModelHandControl(landmarks, timestamp, pose = "idle") {
   }
   if (pose === "select") {
     const pointer = new THREE.Vector2(tip.x * 2 - 1, 1 - tip.y * 2);
-    const hovered = raycastModelPart(pointer);
+    const candidates = raycastModelParts(pointer) || [];
+    const candidateKey = candidates.map((object) => modelParts.find((part) => part.object === object)?.id || object.uuid).join("|");
+    const previousKey = modelPickKey;
+    const previousPoint = modelLastSelectPoint;
+    const movedToAnotherArea = !previousPoint || Math.hypot(tip.x - previousPoint.x, tip.y - previousPoint.y) > .065;
+    if (candidateKey !== modelPickKey || movedToAnotherArea) {
+      modelPickCandidates = candidates;
+      modelPickIndex = 0;
+      modelPickKey = candidateKey;
+    }
+    if (modelSelectEntryId !== modelSelectHandledEntry) {
+      const sameStack = previousKey && previousKey === candidateKey && previousPoint && !movedToAnotherArea && modelPickCandidates.length > 1;
+      if (sameStack) modelPickIndex = (modelPickIndex + 1) % modelPickCandidates.length;
+      modelSelectHandledEntry = modelSelectEntryId;
+    }
+    const hovered = modelPickCandidates[modelPickIndex] || null;
     if (hovered !== modelHoverPart) {
       modelHoverPart = hovered; modelHoverSince = timestamp; modelSelectionCommitted = false;
       if (hovered) showModelSelectionHelper(hovered);
@@ -1080,10 +1112,14 @@ function applyModelHandControl(landmarks, timestamp, pose = "idle") {
     cursor.style.setProperty("--select-progress", (progress * 360) + "deg");
     if (hovered && progress >= 1 && !modelSelectionCommitted) {
       selectModelObject(hovered); modelSelectionCommitted = true;
+      modelLastSelectPoint = { x: tip.x, y: tip.y }; modelLastSelectKey = candidateKey;
       const record = modelParts.find((part) => part.object === hovered);
-      setStatus("已选中 " + (record?.name || "模型部件") + "；单指移动、握拳旋转、捏合缩放。", "info");
+      const overlapHint = modelPickCandidates.length > 1 ? `（此处有 ${modelPickCandidates.length} 个重叠部件；再次做 V 字可轮换）` : "";
+      setStatus("已选中 " + (record?.name || "模型部件") + overlapHint + "；单指移动、握拳旋转、捏合缩放。", "info");
     }
-    $("modelViewerHint").textContent = hovered ? (modelSelectionCommitted ? "部件已选中 · 单指移动、握拳旋转、捏合缩放" : "指向部件并保持 · " + Math.round(progress * 100) + "%") : "V 字手势：将指尖移到要选的部件上并停留约 0.5 秒。";
+    $("modelViewerHint").textContent = hovered
+      ? (modelPickCandidates.length > 1 ? `重叠部件 ${modelPickIndex + 1}/${modelPickCandidates.length} · ${modelSelectionCommitted ? "已选中；再次做 V 字可轮换" : "保持指向 · " + Math.round(progress * 100) + "%"}` : (modelSelectionCommitted ? "部件已选中 · 单指移动、握拳旋转、捏合缩放" : "指向部件并保持 · " + Math.round(progress * 100) + "%"))
+      : "V 字手势：将指尖移到要选的部件上并停留约 0.5 秒。";
     updateModelGestureUI();
     return;
   }
