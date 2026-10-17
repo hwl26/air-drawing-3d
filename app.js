@@ -359,8 +359,17 @@ function placeModelCenterAtNdc(target, desiredNdc, projected = projectModelCente
 }
 
 function constrainModelTargetToViewport(target) {
-  const projected = projectModelCenter(target);
+  let projected = projectModelCenter(target);
   if (!projected) return false;
+  const maxHalf = .94;
+  if (projected.halfX > maxHalf || projected.halfY > maxHalf) {
+    const fitRatio = Math.min(maxHalf / Math.max(projected.halfX, .001), maxHalf / Math.max(projected.halfY, .001));
+    if (fitRatio < 1 && fitRatio > .02) {
+      target.scale.multiplyScalar(fitRatio);
+      projected = projectModelCenter(target);
+      if (!projected) return false;
+    }
+  }
   return placeModelCenterAtNdc(target, projected.ndc, projected);
 }
 
