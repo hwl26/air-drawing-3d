@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet" />
-    <link rel="stylesheet" href="styles.css" />
+    <link rel="stylesheet" href="styles.css?v=20261018-pinch-v4" />
     <!-- 本地化依赖：vendor/ 内含 three@0.170.0 与 MediaPipe tasks-vision，离线可用 -->
     <script type="importmap">
       {
@@ -35,8 +35,8 @@
         </div>
       </header>
 
-      <section class="workspace">
-        <aside class="control-rail">
+      <section class="workspace" id="workspace">
+        <aside class="control-rail" id="controlRail">
           <div class="panel-heading">
             <span class="section-index">01</span>
             <div><p class="eyebrow">CONTROL DECK</p><h2>控制台</h2></div>
@@ -53,20 +53,11 @@
             <div class="tool-row stroke-tool-row">
               <button class="tool-button active" id="penBtn" type="button" aria-pressed="true" title="画笔"><span class="tool-glyph">✎</span><span>画笔</span></button>
               <button class="tool-button" id="eraserBtn" type="button" aria-pressed="false" title="橡皮擦"><span class="tool-glyph">⌫</span><span>橡皮擦</span></button>
-              <button class="tool-button" id="selectStrokeBtn" type="button" aria-pressed="false" title="选择并拖动一整笔"><span class="tool-glyph">↗</span><span>选择/移动</span></button>
             </div>
             <div class="tool-row compact">
               <button class="icon-button" id="undoBtn" type="button" title="撤销上一笔" aria-label="撤销上一笔">↶</button>
               <button class="icon-button" id="clearBtn" type="button" title="清空画布" aria-label="清空画布">⌫</button>
               <button class="secondary-button inline" id="drawToggleBtn" type="button" aria-pressed="true"><span class="button-icon">✦</span><span id="drawToggleLabel">绘画已启用</span></button>
-            </div>
-          </div>
-
-          <div class="control-group draw-only-control">
-            <div class="label-row"><p class="label">手指使用模式</p><span class="mono">GESTURE</span></div>
-            <div class="gesture-row" role="group" aria-label="手指使用模式">
-              <button class="gesture-button" data-gesture-mode="pinch" type="button" aria-pressed="false">捏合绘画</button>
-              <button class="gesture-button active" data-gesture-mode="index" type="button" aria-pressed="true">食指绘画</button>
             </div>
           </div>
 
@@ -96,7 +87,7 @@
 
           <div class="hint-box draw-only-control">
             <div class="hint-icon">◌</div>
-            <div><strong id="gestureHintTitle">捏合开始绘画</strong><p id="gestureHintText">拇指与食指靠近时落笔，松开即可抬笔。</p></div>
+            <div><strong id="gestureHintTitle">捏合书写 · 并指擦除</strong><p id="gestureHintText">拇指食指捏合书写，分开收笔；拇指中指捏合约 0.25 秒开始截取，食指定位；五指并拢大擦除，食中指并拢小擦除。</p></div>
           </div>
 
           <footer class="rail-footer"><span>MEDIAPIPE HAND LANDMARKER</span><span class="version">v1.0</span></footer>
@@ -104,25 +95,25 @@
 
         <section class="stage" id="stage">
           <div class="stage-header">
-            <div><p class="eyebrow">LIVE WORKSPACE</p><h2>实时工作区</h2></div>
-            <div class="stage-actions"><div class="workspace-tabs" role="tablist" aria-label="工作区"><button class="view-toggle workspace-tab active" id="drawWorkspaceBtn" type="button" role="tab" aria-selected="true">✎ 隔空绘画</button><button class="view-toggle workspace-tab" id="modelWorkspaceBtn" type="button" role="tab" aria-selected="false">◇ 3D 解剖模型</button></div><button class="view-toggle" id="singleModeBtn" type="button" aria-pressed="false">▣ 单屏工作台</button><div class="stage-metrics"><div><span class="metric-label">FPS</span><strong id="fpsValue">--</strong></div><div><span class="metric-label">手部 / 2</span><strong id="handValue">0 / 2</strong></div><div class="depth-metric"><span class="metric-label">相对距离 / Z</span><strong id="depthValue" title="1.00x 是校准位置；小于 1 更近，大于 1 更远。Z 是 MediaPipe 相对深度，不是厘米。">未校准</strong></div><button class="view-toggle depth-calibrate" id="depthCalibrateBtn" type="button" title="以当前手部位置作为相对距离参考">校准距离</button></div></div>
-          </div>
-          <div class="canvas-layout">
-            <div class="camera-card">
-              <div class="card-header"><span>CAMERA FEED</span><span class="live-badge" id="liveBadge">OFFLINE</span></div>
-              <div class="video-wrap" id="videoWrap">
-                <video id="video" autoplay playsinline muted></video>
-                <canvas id="landmarkCanvas"></canvas>
-                <div class="camera-placeholder" id="cameraPlaceholder"><div class="placeholder-ring">◉</div><p>启动摄像头以开始追踪</p><span>请允许浏览器访问摄像头</span></div>
-                <div class="tracking-chip" id="trackingChip"><span class="chip-dot"></span><span id="trackingChipText">等待手部</span></div>
-              </div>
-              <div class="camera-footer"><div><span class="metric-label">指尖坐标</span><strong class="mono" id="coordinateValue">X --- / Y ---</strong></div><div><span class="metric-label">手势</span><strong id="gestureValue">等待输入</strong></div></div>
+            <div class="stage-heading">
+              <button class="icon-button console-toggle" id="consoleToggleBtn" type="button" title="收起控制台" aria-label="收起控制台" aria-expanded="true" aria-controls="controlRail"><span id="consoleToggleIcon" aria-hidden="true">‹</span></button>
+              <div><p class="eyebrow">LIVE WORKSPACE</p><h2>实时工作区</h2></div>
             </div>
+            <div class="stage-actions"><div class="workspace-tabs" role="tablist" aria-label="工作区"><button class="view-toggle workspace-tab active" id="drawWorkspaceBtn" type="button" role="tab" aria-selected="true">✎ 隔空绘画</button><button class="view-toggle workspace-tab" id="modelWorkspaceBtn" type="button" role="tab" aria-selected="false">◇ 3D 解剖模型</button></div><button class="view-toggle" id="singleModeBtn" type="button" aria-pressed="false">▣ 手部骨架</button><div class="stage-metrics"><div><span class="metric-label">FPS</span><strong id="fpsValue">--</strong></div><div><span class="metric-label">手部 / 2</span><strong id="handValue">0 / 2</strong></div><div class="depth-metric"><span class="metric-label">相对距离 / Z</span><strong id="depthValue" title="1.00x 是校准位置；小于 1 更近，大于 1 更远。Z 是 MediaPipe 相对深度，不是厘米。">未校准</strong></div><button class="view-toggle depth-calibrate" id="depthCalibrateBtn" type="button" title="以当前手部位置作为相对距离参考">校准距离</button></div></div>
+          </div>
+          <div class="tracking-strip" aria-label="手部追踪状态">
+            <span class="live-badge" id="liveBadge">OFFLINE</span>
+            <div class="tracking-chip" id="trackingChip"><span class="chip-dot"></span><span id="trackingChipText">等待手部</span></div>
+            <div class="tracking-reading"><span class="metric-label">指尖坐标</span><strong class="mono" id="coordinateValue">X --- / Y ---</strong></div>
+            <div class="tracking-reading"><span class="metric-label">手势</span><strong id="gestureValue">等待输入</strong></div>
+            <label class="camera-analysis-toggle"><input id="cameraAnalysisToggle" type="checkbox" checked aria-controls="cameraAnalysis"><span>摄像头分析</span></label>
+          </div>
+          <div class="canvas-layout camera-analysis-visible" id="canvasLayout">
             <div class="drawing-card">
               <div class="drawing-pane" id="drawingPane">
                 <div class="card-header"><span>DRAWING SURFACE</span><span class="mode-badge" id="modeBadge">READY</span></div>
-                <div class="drawing-wrap" id="drawingWrap"><canvas id="stageVideoCanvas" class="stage-video-canvas" aria-hidden="true"></canvas><canvas id="drawingCanvas"></canvas><canvas id="stageHandCanvas" class="stage-hand-canvas" aria-hidden="true"></canvas><div class="tip-cursor" id="tipCursor" aria-hidden="true"></div><div class="draw-empty" id="drawEmpty"><div class="crosshair">＋</div><p id="drawEmptyTitle">伸出食指开始创作</p><span>线条会出现在这里</span></div></div>
-                <div class="drawing-footer"><span><i class="legend-dot"></i><span id="drawingStateText">画布待命</span></span><span class="mono" id="strokeCount">0 笔</span></div>
+                <div class="drawing-wrap" id="drawingWrap"><canvas id="drawingCanvas"></canvas><canvas id="stageHandCanvas" class="stage-hand-canvas" aria-hidden="true"></canvas><div class="tip-cursor" id="tipCursor" aria-hidden="true"></div><div class="draw-empty" id="drawEmpty"><div class="crosshair">＋</div><p id="drawEmptyTitle">捏合拇指与食指开始创作</p><span>线条会出现在这里</span></div><div class="region-selection-overlay" id="regionSelectionOverlay" hidden aria-hidden="true"></div><p class="region-selection-hint" id="regionSelectionHint" hidden aria-live="polite">拇指与中指捏合，食指定位并移动框选；松开拇指与中指约 0.1 秒完成，也可点击“完成截取”。</p></div>
+                <div class="drawing-footer"><span><i class="legend-dot"></i><span id="drawingStateText">画布待命</span></span><div class="drawing-footer-actions"><button class="model-mini-button region-select-button" id="selectRegionBtn" type="button" aria-pressed="false">截取区域</button><button class="model-mini-button" id="cancelRegionBtn" type="button" hidden>取消选区</button><button class="model-mini-button" id="confirmRegionBtn" type="button" hidden disabled>完成截取</button><button class="model-mini-button" id="openImageWorkflowBtn" type="button" hidden>图片素材</button><span class="mono" id="strokeCount">0 笔</span></div></div>
               </div>
               <section class="model-workspace" id="modelWorkspacePane" hidden aria-label="3D 解剖模型工作区">
                 <aside class="model-sidebar">
@@ -135,6 +126,7 @@
                     <textarea id="hyper3dPrompt" class="model-search hyper3d-prompt" maxlength="1024" placeholder="例如：真实比例的胰腺解剖模型，表面平滑，单一独立结构"></textarea>
                     <label class="hyper3d-upload" id="hyper3dUploadRow" for="hyper3dImages" hidden><span>＋ 选择参考图</span><small id="hyper3dImageNames">PNG / JPG / WEBP，最多 5 张</small></label>
                     <input id="hyper3dImages" type="file" accept="image/png,image/jpeg,image/webp" multiple hidden>
+                    <div class="hyper3d-sketch-source" id="hyper3dSketchSource" hidden><img id="hyper3dSketchPreview" alt="选定的画板素材" /><div><span id="hyper3dSketchLabel">来自隔空画板</span><div class="hyper3d-sketch-actions"><button class="model-mini-button" id="returnToImageWorkflowBtn" type="button">返回图片编辑</button><button class="model-mini-button" id="clearHyper3dSketchBtn" type="button">移除素材</button></div></div></div>
                     <div class="hyper3d-spec">默认：Gen‑2.5 Medium · GLB · Raw 20k（快速档）</div>
                     <button class="model-primary-button hyper3d-generate" id="hyper3dGenerateBtn" type="button" disabled>◇ 生成 3D 模型</button>
                     <div class="hyper3d-task-state" id="hyper3dTaskState" aria-live="polite">请先启动本地 Node 服务并配置 Hyper3D API Key。</div>
@@ -188,11 +180,85 @@
                 </div>
               </section>
             </div>
+            <aside class="camera-analysis" id="cameraAnalysis" aria-label="摄像头分析">
+              <div class="camera-analysis-heading"><strong>摄像头原始画面</strong><label><input id="cameraSkeletonToggle" type="checkbox"><span>骨架</span></label></div>
+              <div class="video-wrap camera-source" id="videoWrap">
+                <video id="video" autoplay playsinline muted></video>
+                <canvas id="landmarkCanvas" hidden aria-hidden="true"></canvas>
+                <div class="camera-placeholder" id="cameraPlaceholder"><p>摄像头未启动</p></div>
+              </div>
+              <div class="camera-analysis-meta"><span>全幅 · 镜像</span><span class="mono" id="cameraAnalysisTime">00:00.0</span></div>
+              <dl class="camera-analysis-readings">
+                <div><dt>识别标签</dt><dd id="cameraHandLabels">--</dd></div>
+                <div><dt>当前落笔状态</dt><dd id="cameraPenReason">摄像头未启动</dd></div>
+                <div><dt>手势诊断</dt><dd id="cameraGestureDetail">等待手部</dd></div>
+                <div><dt>最近一次停笔</dt><dd id="cameraLastPenLift">--</dd></div>
+              </dl>
+              <table class="camera-angle-table" aria-label="当前手势判定数据"><thead><tr><th scope="col">判定项目</th><th scope="col">实测</th><th scope="col">条件</th></tr></thead><tbody>
+                <tr id="cameraPinchRatioRow"><th scope="row">捏合投影距离比</th><td id="cameraPinchRatio">--</td><td id="cameraPinchCondition">起笔 &lt;0.25</td></tr>
+                <tr id="cameraThumbAngleRow"><th scope="row">拇指 IP</th><td id="cameraThumbAngle">--</td><td id="cameraThumbCondition">不限</td></tr>
+                <tr id="cameraIndexAngleRow"><th scope="row">食指</th><td id="cameraIndexAngle">--</td><td id="cameraIndexCondition">不限</td></tr>
+                <tr id="cameraMiddleAngleRow"><th scope="row">中指</th><td id="cameraMiddleAngle">--</td><td id="cameraMiddleCondition">不限</td></tr>
+                <tr id="cameraRingAngleRow"><th scope="row">无名指</th><td id="cameraRingAngle">--</td><td id="cameraRingCondition">不限</td></tr>
+                <tr id="cameraPinkyAngleRow"><th scope="row">小指</th><td id="cameraPinkyAngle">--</td><td id="cameraPinkyCondition">不限</td></tr>
+              </tbody></table>
+            </aside>
           </div>
           <div class="status-bar" id="statusBar"><span class="status-icon">i</span><span id="statusMessage">准备就绪。启动摄像头后，模型会自动加载。</span></div>
         </section>
       </section>
     </main>
-    <script type="module" src="app.js"></script>
+    <dialog class="image-workflow-dialog" id="imageWorkflowDialog" aria-labelledby="imageWorkflowTitle" aria-describedby="imageWorkflowDescription">
+      <div class="image-workflow-shell">
+        <header class="image-workflow-header">
+          <div><h2 id="imageWorkflowTitle">图像编辑</h2><p id="imageWorkflowDescription">描述修改要求，生成新图片；满意后可继续转为 3D。</p></div>
+          <button class="icon-button workflow-close" id="closeImageWorkflowBtn" type="button" aria-label="关闭素材面板" title="关闭素材面板">×</button>
+        </header>
+        <div class="image-workflow-content">
+          <section class="workflow-materials" aria-label="素材预览与版本">
+            <div class="workflow-section-heading"><h3>当前图片</h3><span class="mono" id="regionDimensions">-- × --</span></div>
+            <figure class="workflow-image-card"><div class="workflow-image-preview"><img id="sourceRegionImage" alt="当前选中的图片" /></div><figcaption><span id="currentRegionLabel">原始选区</span><button class="model-mini-button" id="downloadRegionBtn" type="button">下载 PNG</button></figcaption></figure>
+            <details class="workflow-details workflow-history"><summary>历史版本</summary><div class="workflow-details-content"><div class="workflow-version-row"><label for="imageVersionSelect">切换图片</label><select class="model-search" id="imageVersionSelect"><option value="source">原始选区</option></select></div><p class="workflow-note">保留原图及最近 7 次编辑。刷新或重新截取前，请下载需要保存的图片。</p></div></details>
+          </section>
+          <section class="workflow-editor" aria-label="图像编辑与生成设置">
+            <label class="workflow-label workflow-main-label" for="imagePromptIntent">修改要求</label>
+            <textarea class="workflow-textarea workflow-intent" id="imagePromptIntent" maxlength="2000" placeholder="例如：把这个爱心变成卡通风格，保留轮廓，添加柔和的立体质感。"></textarea>
+            <div class="workflow-prompt-tools"><button class="model-mini-button" id="voiceImagePromptBtn" type="button">语音输入</button><button class="model-mini-button" id="organizeImagePromptBtn" type="button">简单润色</button></div>
+            <p class="workflow-note voice-prompt-state" id="voicePromptState" aria-live="polite">语音输入在静音 3 秒后自动结束。</p>
+            <div class="workflow-edit-actions"><button class="primary-button" id="editRegionImageBtn" type="button">生成编辑图</button><button class="secondary-button" id="useImageFor3DBtn" type="button" hidden disabled>生成 3D</button></div>
+            <p class="workflow-task-state" id="imageEditState" aria-live="polite">填写修改要求后生成，原画板会保留。</p>
+            <details class="workflow-details workflow-options"><summary>更多选项</summary><div class="workflow-details-content"><label class="workflow-checkbox" for="prepareImageFor3D"><input id="prepareImageFor3D" type="checkbox" checked /><span><strong>优化为 3D 参考图</strong><small>润色时加入完整主体、清晰轮廓和干净背景要求。</small></span></label><label class="workflow-label" for="region3DPrompt">3D 模型描述（可选）</label><textarea class="workflow-textarea workflow-model-prompt" id="region3DPrompt" maxlength="1024" placeholder="补充模型的立体外观要求"></textarea><p class="workflow-note">“生成 3D”会先打开参考图预览，确认后再提交三维任务。</p><div class="workflow-service-status"><p class="workflow-connection" id="imageEditConnectionState">检查图像编辑配置…</p><p class="workflow-note" id="imagePromptHelp">润色后的要求可以直接修改。</p></div></div></details>
+          </section>
+        </div>
+      </div>
+    </dialog>
+    <script>
+      (() => {
+        document.documentElement.dataset.appState = "loading";
+        const showError = (error) => {
+          document.documentElement.dataset.appState = "error";
+          document.getElementById("statusBar").dataset.kind = "error";
+          document.getElementById("statusMessage").textContent = `页面启动或运行失败：${error?.message || error || "未知错误"}`;
+          document.getElementById("headerStatusText").textContent = "页面运行异常";
+          document.getElementById("headerStatusDot").classList.remove("active");
+        };
+        window.addEventListener("error", (event) => {
+          if (event.error || event.message) showError(event.error || event.message);
+        });
+        window.addEventListener("unhandledrejection", (event) => showError(event.reason));
+        if (window.location.protocol === "file:") {
+          showError("当前打开的是本地文件，请通过本地服务访问：");
+          document.getElementById("headerStatusText").textContent = "请通过本地服务打开";
+          const link = document.createElement("a");
+          link.href = "http://localhost:8000/";
+          link.textContent = link.href;
+          document.getElementById("statusMessage").append(link);
+          return;
+        }
+        import("./app.js?v=20261018-glb-download-v1")
+          .then(() => { document.documentElement.dataset.appState = "ready"; })
+          .catch(showError);
+      })();
+    </script>
   </body>
 </html>

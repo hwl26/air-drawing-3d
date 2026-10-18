@@ -4,6 +4,8 @@ import { OBJLoader } from "three/addons/loaders/OBJLoader.js";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { TransformControls } from "three/addons/controls/TransformControls.js";
+import { createImageWorkflow } from "./image-workflow.js?v=20261018-pinch-v4";
+import { createPinchOwner, createDrawingGain, INDEX_PINCH_START, INDEX_PINCH_END } from "./pinch-owner.js?v=20261018-pinch-v4";
 
 const MODEL_ROOT = "partof_BP3D_4.0_obj_99/partof_BP3D_4.0_obj_99/";
 const MODEL_CATALOG_URL = "model-catalog.json";
@@ -12,8 +14,15 @@ const HYPER3D_API_BASE = window.__AIR_DRAWING_API_BASE__ || "";
 const MODEL_URL = "./vendor/mp/hand_landmarker.task";
 const WASM_URL = "./vendor/mp/wasm";
 const CONNECTIONS = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,11],[11,12],[9,13],[13,14],[14,15],[15,16],[13,17],[17,18],[18,19],[19,20],[0,17]];
-const STROKE_RESUME_WINDOW_MS = 420;
-const GESTURE_HOLD_MS = 240;
+const DRAW_PINCH_START_RATIO = INDEX_PINCH_START;
+const DRAW_PINCH_END_RATIO = INDEX_PINCH_END;
+const drawingPinchOwner = createPinchOwner();
+const drawingGain = createDrawingGain();
+const ERASER_GESTURE_HOLD_MS = 80;
+const ERASER_REACQUIRE_MS = 160;
+const ERASER_SMALL_SIZE = 36;
+const MIN_DRAW_POINT_DISTANCE = 0.35;
+const DRAWING_INPUT_BOUNDS = { left: 0.12, right: 0.88, top: 0.08, bottom: 0.60 };
 
 const $ = (id) => document.getElementById(id);
 const video = $("video");
@@ -22,11 +31,9 @@ const drawingCanvas = $("drawingCanvas");
 const drawingWrap = $("drawingWrap");
 const modelViewer = $("modelViewer");
 const stageHandCanvas = $("stageHandCanvas");
-const stageVideoCanvas = $("stageVideoCanvas");
 const landmarkCtx = landmarkCanvas.getContext("2d");
 const drawingCtx = drawingCanvas.getContext("2d");
 const stageHandCtx = stageHandCanvas.getContext("2d");
-const stageVideoCtx = stageVideoCanvas.getContext("2d");
 let handLandmarker = null;
 let modelPromise = null;
 let stream = null;
@@ -42,10 +49,13 @@ let filterX = null;
 let filterY = null;
 let handPresent = false;
 let pinchActive = false;
+let drawingPinchActive = false;
 let indexModeActive = false;
 let drawingActive = false;
+let drawingFrameDiagnostics = null;
+let cameraAnalysisStart = null;
+let cameraAnalysisWasDrawing = false;
 let drawEnabled = true;
-let gestureMode = "index";
 let primaryHand = "Right";
 // MediaPipe's handedness can differ between browser/camera pipelines because
 // some drivers mirror the selfie frame before inference. Keep a user-visible
@@ -53,17 +63,14 @@ let primaryHand = "Right";
 let swapHandLabels = false;
 let singleScreen = false;
 let isEraser = false;
-let selectionMode = false;
+let gestureEraser = null;
+let eraserCandidate = null;
+let eraserSession = null;
+let eraserTipFilter = null;
 let brushColor = "#54E6C0";
 let brushSize = 8;
 let strokes = [];
 let currentStroke = null;
-let selectedStroke = null;
-let selectionDrag = null;
-let missingSince = 0;
-let pausedPoint = null;
-let drawGestureHoldUntil = 0;
-let lastDrawTimestamp = 0;
 let depthFilter = null;
 let depthFilterTime = 0;
 let depthBaselineSpan = null;
@@ -120,6 +127,11 @@ let modelTwoHandLastDistance = null;
 let modelTwoHandLastAngle = null;
 let hyper3dTask = null;
 let hyper3dPolling = false;
+let hyper3dSubmitting = false;
+let hyper3dAvailable = false;
+let hyper3dSketchSource = null;
+let imageWorkflow = null;
+let workflowResumeNeedsRelease = false;
 const MODEL_MODULES = [
   { id: "pancreas", label: "胰腺 · 入门部件（1）", description: "加载胰腺单个结构，最适合先练习选择、移动、旋转、缩放和拆分。", parts: ["FJ1895"] },
   { id: "kidneys", label: "双肾 · 左右对照（2）", description: "左右肾各一个独立部件，适合练习成对结构对照与逐件操作。", parts: ["FJ3145", "FJ3147"] },
@@ -645,11 +657,13 @@ async function refreshHyper3DConfig() {
     const response = await fetch(`${HYPER3D_API_BASE}/api/hyper3d/config`, { cache: "no-store" });
     if (!response.ok) throw new Error("local api unavailable");
     const config = await response.json();
+    hyper3dAvailable = Boolean(config.available);
     state.textContent = config.available ? "本地代理已连接" : "需要配置 API Key";
     state.style.color = config.available ? "var(--mint)" : "var(--muted)";
-    button.disabled = !config.available;
+    button.disabled = !config.available || hyper3dSubmitting || hyper3dPolling;
     setHyper3DTaskState(config.available ? "已连接 Hyper3D Rodin Gen‑2.5，可提交文字或参考图。" : "请在项目根目录 .env 设置 RODIN_API_KEY，然后重启 node server.mjs。", config.available ? "active" : "info");
   } catch (error) {
+    hyper3dAvailable = false;
     state.textContent = "未检测到本地代理"; state.style.color = "var(--muted)"; button.disabled = true;
     setHyper3DTaskState("当前页面由静态服务器提供；使用 Hyper3D 需要改用 node server.mjs 启动。", "info");
   }
@@ -658,13 +672,27 @@ async function refreshHyper3DConfig() {
 function updateHyper3DInputMode() {
   const imageMode = $("hyper3dInputMode")?.value === "image";
   $("hyper3dUploadRow")?.toggleAttribute("hidden", !imageMode);
+  if ($("hyper3dSketchSource")) $("hyper3dSketchSource").hidden = !imageMode || !hyper3dSketchSource;
   $("hyper3dPrompt")?.setAttribute("placeholder", imageMode ? "可选：补充方向、结构或材质提示" : "例如：真实比例的胰腺解剖模型，表面平滑，单一独立结构");
 }
 
 function updateHyper3DImageNames() {
   const files = [...($("hyper3dImages")?.files || [])];
   const label = $("hyper3dImageNames");
-  if (label) label.textContent = files.length ? `${files.length} 张已选择${files.length > 5 ? "（最多使用前 5 张）" : ""}` : "PNG / JPG / WEBP，最多 5 张";
+  const count = files.length + (hyper3dSketchSource ? 1 : 0);
+  if (label) label.textContent = count ? `${hyper3dSketchSource ? "含选区素材 · " : ""}${count} 张已选择${count > 5 ? "（最多使用前 5 张）" : ""}` : "PNG / JPG / WEBP，最多 5 张";
+}
+
+function prepareRegionForHyper3D(source) {
+  hyper3dSketchSource = source;
+  $("hyper3dInputMode").value = "image";
+  $("hyper3dImages").value = "";
+  $("hyper3dPrompt").value = source.prompt || "";
+  if ($("hyper3dSketchPreview")) $("hyper3dSketchPreview").src = source.image;
+  if ($("hyper3dSketchLabel")) $("hyper3dSketchLabel").textContent = `来自隔空选区 · ${source.label}`;
+  updateHyper3DInputMode(); updateHyper3DImageNames();
+  setActiveWorkspace("model");
+  setHyper3DTaskState(hyper3dAvailable ? "已带入选定的编辑结果。检查图片与描述后，点击“生成 3D 模型”提交 Rodin。" : "编辑结果已保留。请配置 RODIN_API_KEY 并重启服务，再提交 3D 生成。");
 }
 
 async function pollHyper3DTask() {
@@ -702,7 +730,7 @@ async function pollHyper3DTask() {
     setHyper3DTaskState(error.message || "Hyper3D 任务失败。", "error");
   } finally {
     hyper3dPolling = false;
-    $("hyper3dGenerateBtn").disabled = false;
+    $("hyper3dGenerateBtn").disabled = !hyper3dAvailable || hyper3dSubmitting;
   }
 }
 
@@ -710,11 +738,46 @@ function renderHyper3DResults(list) {
   const host = $("hyper3dResults"); if (!host) return; host.replaceChildren();
   const glbItems = list.filter((item) => item?.url && item?.name && /\.glb$/i.test(item.name));
   glbItems.forEach((item) => {
-    const button = document.createElement("button"); button.type = "button"; button.className = "hyper3d-result-button"; button.textContent = `＋ 导入 ${item.name}`;
-    button.addEventListener("click", () => importHyper3DResult(item, button)); host.append(button);
+    const row = document.createElement("div"); row.className = "hyper3d-result-row";
+    const importButton = document.createElement("button"); importButton.type = "button"; importButton.className = "hyper3d-result-button"; importButton.textContent = `＋ 导入 ${item.name}`;
+    importButton.addEventListener("click", () => importHyper3DResult(item, importButton));
+    const downloadButton = document.createElement("button"); downloadButton.type = "button"; downloadButton.className = "hyper3d-result-button hyper3d-download-button"; downloadButton.textContent = "↓ 下载 GLB";
+    downloadButton.addEventListener("click", () => downloadHyper3DResult(item, downloadButton));
+    row.append(importButton, downloadButton); host.append(row);
   });
   if (!glbItems.length) {
     const note = document.createElement("div"); note.className = "model-note"; note.textContent = "任务完成，但没有找到可直接导入的 GLB 输出。请在 Hyper3D Dashboard 下载其他格式后转换。"; host.append(note);
+  }
+}
+
+function hyper3DDownloadName(name) {
+  const fallback = "Hyper3D-model.glb";
+  const value = String(name || fallback).split(/[\\/]/).pop().replace(/[\u0000-\u001f<>:"|?*]/g, "_").trim();
+  if (!value) return fallback;
+  return /\.glb$/i.test(value) ? value : `${value}.glb`;
+}
+
+async function downloadHyper3DResult(item, button) {
+  if (!item?.url || button.disabled) return;
+  const originalLabel = button.textContent;
+  button.disabled = true; button.textContent = "正在下载…";
+  try {
+    const proxyUrl = `${HYPER3D_API_BASE}/api/hyper3d/file?url=${encodeURIComponent(item.url)}`;
+    const response = await fetch(proxyUrl);
+    if (!response.ok) { const payload = await response.json().catch(() => ({})); throw new Error(payload.message || `模型下载失败（HTTP ${response.status}）`); }
+    const blob = await response.blob();
+    if (!blob.size) throw new Error("模型文件为空。");
+    const objectUrl = URL.createObjectURL(blob);
+    const link = document.createElement("a"); link.href = objectUrl; link.download = hyper3DDownloadName(item.name); link.style.display = "none";
+    document.body.append(link); link.click(); link.remove();
+    setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+    button.textContent = "✓ 已下载 GLB";
+    setStatus(`已下载 ${hyper3DDownloadName(item.name)}，文件在浏览器默认下载目录。`, "info");
+  } catch (error) {
+    console.error("[Air Drawing] Hyper3D download failed:", error);
+    button.textContent = originalLabel; setHyper3DTaskState(error.message || "模型下载失败。", "error");
+  } finally {
+    button.disabled = false;
   }
 }
 
@@ -734,29 +797,39 @@ async function importHyper3DResult(item, button) {
 }
 
 async function generateHyper3D() {
+  if (hyper3dSubmitting || hyper3dPolling) return;
+  if (!hyper3dAvailable) { setHyper3DTaskState("请先配置 RODIN_API_KEY 并重启项目服务。", "error"); return; }
   const mode = $("hyper3dInputMode")?.value || "text";
   const prompt = $("hyper3dPrompt")?.value.trim() || "";
-  const files = [...($("hyper3dImages")?.files || [])].slice(0, 5);
+  const files = mode === "image" ? [ ...(hyper3dSketchSource ? [hyper3dSketchSource.file] : []), ...($("hyper3dImages")?.files || []) ].slice(0, 5) : [];
   if (mode === "text" && !prompt) { setHyper3DTaskState("文字生成需要填写模型描述。", "error"); return; }
   if (mode === "image" && !files.length) { setHyper3DTaskState("图片生成至少需要选择一张参考图。", "error"); return; }
   const form = new FormData();
   if (prompt) form.append("prompt", prompt);
   files.forEach((file) => form.append("images", file, file.name));
   form.append("tier", "Gen-2.5-Medium"); form.append("mesh_mode", "Raw"); form.append("quality_override", "20000"); form.append("geometry_file_format", "glb"); form.append("material", "PBR");
+  hyper3dSubmitting = true;
   $("hyper3dGenerateBtn").disabled = true; $("hyper3dResults")?.replaceChildren(); setHyper3DTaskState("正在提交 Hyper3D 生成任务…", "active");
   try {
     const response = await fetch(`${HYPER3D_API_BASE}/api/hyper3d/generate`, { method: "POST", body: form });
     const payload = await response.json().catch(() => ({}));
     if (!response.ok || payload.error || !payload.uuid || !payload.jobs?.subscription_key) throw new Error(payload.message || payload.error || "Hyper3D 没有接受该任务。");
-    hyper3dTask = { taskUuid: payload.uuid, subscriptionKey: payload.jobs.subscription_key };
+    hyper3dTask = { taskUuid: payload.uuid, subscriptionKey: payload.jobs.subscription_key, source: mode === "image" && hyper3dSketchSource ? { assetId: hyper3dSketchSource.assetId, versionId: hyper3dSketchSource.versionId } : null };
     setHyper3DTaskState("任务已提交；首次状态查询将在 5 秒后开始。", "active");
     pollHyper3DTask();
   } catch (error) {
-    console.error("[Air Drawing] Hyper3D generation failed:", error); setHyper3DTaskState(error.message || "Hyper3D 提交失败。", "error"); $("hyper3dGenerateBtn").disabled = false;
+    console.error("[Air Drawing] Hyper3D generation failed:", error); setHyper3DTaskState(error.message || "Hyper3D 提交失败。", "error");
+  } finally {
+    hyper3dSubmitting = false;
+    $("hyper3dGenerateBtn").disabled = !hyper3dAvailable || hyper3dPolling;
   }
 }
 
 function setActiveWorkspace(workspace) {
+  finishStroke();
+  resetEraserGesture();
+  imageWorkflow?.cancelSelection();
+  if (imageWorkflow?.isBlocking()) imageWorkflow.close();
   activeWorkspace = workspace; const model = workspace === "model"; document.body.classList.toggle("model-workspace-active", model); $("drawingPane").hidden = model; $("modelWorkspacePane").hidden = !model; $("drawWorkspaceBtn").classList.toggle("active", !model); $("modelWorkspaceBtn").classList.toggle("active", model); $("drawWorkspaceBtn").setAttribute("aria-selected", String(!model)); $("modelWorkspaceBtn").setAttribute("aria-selected", String(model)); updateSingleScreenOverlay(); lastModelHandTip = null; modelHandGesture = false; modelHandPose = "idle"; modelGestureCandidate = null; modelGestureCandidateFrames = 0; updateModelGestureUI(); if (model) { createModelViewer(); loadModelCatalog(); requestAnimationFrame(() => { resizeModelViewer(); startModelRenderLoop(); }); } else { stopModelRenderLoop(); finishStroke(); } setStatus(model ? "3D 解剖工作台已启用。开启手势后可用姿势选择、移动、旋转和缩放模型。" : "隔空绘画工作台已启用。", "info"); }
 
 function modelPoseLabel(pose = modelHandPose) {
@@ -1250,42 +1323,52 @@ function resizeCanvas(canvas, ctx, preserve = true) {
 }
 
 function resizeAll() {
+  // Footer hints/buttons can resize the canvas while entering selection.
+  // Both ink and the selection use normalized coordinates, so observer-driven
+  // resizes can preserve the rectangle. Explicit layout actions cancel below.
   resizeCanvas(landmarkCanvas, landmarkCtx, false);
   resizeCanvas(drawingCanvas, drawingCtx, true);
   resizeCanvas(stageHandCanvas, stageHandCtx, false);
-  resizeCanvas(stageVideoCanvas, stageVideoCtx, false);
   redrawAll();
+}
+
+function setConsoleCollapsed(collapsed) {
+  imageWorkflow?.cancelSelection();
+  // A layout change must not connect the in-progress stroke to a new scale.
+  finishStroke();
+  resetEraserGesture();
+  $("workspace").classList.toggle("console-collapsed", collapsed);
+  $("controlRail").hidden = collapsed;
+  const label = collapsed ? "展开控制台" : "收起控制台";
+  $("consoleToggleBtn").setAttribute("aria-expanded", String(!collapsed));
+  $("consoleToggleBtn").setAttribute("aria-label", label);
+  $("consoleToggleBtn").title = label;
+  $("consoleToggleIcon").textContent = collapsed ? "›" : "‹";
+  requestAnimationFrame(() => { resizeAll(); resizeModelViewer(); });
 }
 
 function setTool(tool) {
+  imageWorkflow?.cancelSelection();
   finishStroke();
-  selectionMode = tool === "select";
+  resetEraserGesture();
   isEraser = tool === "eraser";
-  if (!selectionMode) selectedStroke = null;
-  $("penBtn").classList.toggle("active", tool === "pen"); $("penBtn").setAttribute("aria-pressed", String(tool === "pen"));
-  $("eraserBtn").classList.toggle("active", isEraser); $("eraserBtn").setAttribute("aria-pressed", String(isEraser));
-  $("selectStrokeBtn").classList.toggle("active", selectionMode); $("selectStrokeBtn").setAttribute("aria-pressed", String(selectionMode));
-  $("drawingWrap").classList.toggle("selection-active", selectionMode);
-  selectionDrag = null;
+  updateToolButtons();
   redrawAll();
-  setStatus(selectionMode
-    ? "选择/移动已启用：点击一笔后拖动，可整体移动；隔空落笔已暂停。"
-    : isEraser ? "橡皮擦已启用，按当前手指模式可擦除线条。" : "画笔已启用，按当前手指模式可开始绘画。");
+  setStatus(isEraser ? "手动橡皮擦已启用。" : "画笔已启用。");
 }
 
-function updateGestureModeUI() {
-  document.querySelectorAll("[data-gesture-mode]").forEach((item) => {
-    const active = item.dataset.gestureMode === gestureMode;
-    item.classList.toggle("active", active);
-    item.setAttribute("aria-pressed", String(active));
-  });
-  const isPinch = gestureMode === "pinch";
-  $("gestureHintTitle").textContent = isPinch ? "捏合落笔，松开停笔" : "伸出食指落笔，弯曲停笔";
-  $("gestureHintText").textContent = isPinch
-    ? "短暂漏检或快速移动会自动补线；松开即可抬笔，移动后再次捏合继续画。"
-    : "短暂漏检或快速移动会自动补线；弯曲食指抬笔，移动后再伸出继续画。";
-  $("drawEmptyTitle").textContent = isPinch ? "捏合手指开始创作" : "伸出食指开始创作";
-  updateDrawingUI();
+function updateToolButtons() {
+  const erasing = Boolean(gestureEraser) || isEraser;
+  $("penBtn").classList.toggle("active", !erasing); $("penBtn").setAttribute("aria-pressed", String(!erasing));
+  $("eraserBtn").classList.toggle("active", erasing); $("eraserBtn").setAttribute("aria-pressed", String(erasing));
+}
+
+function resetEraserGesture() {
+  gestureEraser = null;
+  eraserCandidate = null;
+  eraserSession = null;
+  eraserTipFilter = null;
+  updateToolButtons();
 }
 
 function redrawAll() {
@@ -1293,119 +1376,16 @@ function redrawAll() {
   drawingCtx.clearRect(0, 0, rect.width, rect.height);
   for (const stroke of strokes) drawStroke(stroke);
   if (currentStroke) drawStroke(currentStroke);
-  if (selectionMode && selectedStroke && strokes.includes(selectedStroke)) drawSelectionOutline(selectedStroke);
   updateDrawingUI();
 }
 
 function updateDrawingUI() {
   $("drawEmpty").classList.toggle("hidden", strokes.length > 0 || !!currentStroke);
   if (!strokes.length && !currentStroke) {
-    $("drawEmptyTitle").textContent = selectionMode ? "还没有可移动的笔画" : gestureMode === "pinch" ? "捏合手指开始创作" : "伸出食指开始创作";
-    $("drawEmpty").querySelector("span").textContent = selectionMode ? "切回画笔画出一笔，再选择并拖动" : "线条会出现在这里";
+    $("drawEmptyTitle").textContent = "捏合书写";
+    $("drawEmpty").querySelector("span").textContent = "拇指与食指";
   }
   $("strokeCount").textContent = `${strokes.length + (currentStroke ? 1 : 0)} 笔`;
-}
-
-function strokeBounds(stroke) {
-  const rect = drawingCanvas.getBoundingClientRect();
-  const radiusX = (stroke.size / 2 + 7) / Math.max(1, rect.width);
-  const radiusY = (stroke.size / 2 + 7) / Math.max(1, rect.height);
-  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-  for (const point of stroke.points) { minX = Math.min(minX, point.x); maxX = Math.max(maxX, point.x); minY = Math.min(minY, point.y); maxY = Math.max(maxY, point.y); }
-  return {
-    minX: Math.max(0, minX - radiusX), maxX: Math.min(1, maxX + radiusX),
-    minY: Math.max(0, minY - radiusY), maxY: Math.min(1, maxY + radiusY)
-  };
-}
-
-function drawSelectionOutline(stroke) {
-  const rect = drawingCanvas.getBoundingClientRect(), bounds = strokeBounds(stroke);
-  const x = bounds.minX * rect.width, y = bounds.minY * rect.height;
-  const width = (bounds.maxX - bounds.minX) * rect.width, height = (bounds.maxY - bounds.minY) * rect.height;
-  drawingCtx.save();
-  drawingCtx.globalCompositeOperation = "source-over";
-  drawingCtx.shadowBlur = 0;
-  drawingCtx.strokeStyle = "rgba(84,230,192,.95)";
-  drawingCtx.lineWidth = 1.5;
-  drawingCtx.setLineDash([5, 4]);
-  drawingCtx.strokeRect(x, y, Math.max(8, width), Math.max(8, height));
-  drawingCtx.setLineDash([]);
-  drawingCtx.fillStyle = "#54E6C0";
-  drawingCtx.fillRect(x - 3, y - 3, 6, 6);
-  drawingCtx.fillRect(x + width - 3, y + height - 3, 6, 6);
-  drawingCtx.restore();
-}
-
-function distanceToSegment(point, start, end) {
-  const dx = end.x - start.x, dy = end.y - start.y;
-  const lengthSquared = dx * dx + dy * dy;
-  const ratio = lengthSquared ? Math.max(0, Math.min(1, ((point.x - start.x) * dx + (point.y - start.y) * dy) / lengthSquared)) : 0;
-  return Math.hypot(point.x - (start.x + ratio * dx), point.y - (start.y + ratio * dy));
-}
-
-function findStrokeAt(point) {
-  const rect = drawingCanvas.getBoundingClientRect();
-  const pixelPoint = { x: point.x * rect.width, y: point.y * rect.height };
-  for (let index = strokes.length - 1; index >= 0; index -= 1) {
-    const stroke = strokes[index];
-    if (stroke.eraser || !stroke.points.length) continue;
-    const tolerance = 12 + stroke.size / 2;
-    if (stroke.points.length === 1) {
-      const only = stroke.points[0];
-      if (Math.hypot(pixelPoint.x - only.x * rect.width, pixelPoint.y - only.y * rect.height) <= tolerance) return stroke;
-      continue;
-    }
-    for (let pointIndex = 1; pointIndex < stroke.points.length; pointIndex += 1) {
-      const previous = stroke.points[pointIndex - 1], current = stroke.points[pointIndex];
-      const start = { x: previous.x * rect.width, y: previous.y * rect.height };
-      const end = { x: current.x * rect.width, y: current.y * rect.height };
-      if (distanceToSegment(pixelPoint, start, end) <= tolerance) return stroke;
-    }
-  }
-  return null;
-}
-
-function normalizedCanvasPoint(event) {
-  const rect = drawingCanvas.getBoundingClientRect();
-  return { x: Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width)), y: Math.max(0, Math.min(1, (event.clientY - rect.top) / rect.height)) };
-}
-
-function beginStrokeSelection(event) {
-  if (!selectionMode || event.button !== 0) return;
-  event.preventDefault();
-  finishStroke();
-  const point = normalizedCanvasPoint(event);
-  selectedStroke = findStrokeAt(point);
-  if (selectedStroke) {
-    const rect = drawingCanvas.getBoundingClientRect();
-    drawingCanvas.setPointerCapture(event.pointerId);
-    selectionDrag = { pointerId: event.pointerId, start: point, points: selectedStroke.points.map((item) => ({ ...item })) };
-    setStatus("已选择一笔；拖动可移动，点击空白处可取消选择。", "info");
-  } else {
-    selectionDrag = null;
-    setStatus("未选中笔画；请点在线条附近，或切回画笔继续绘制。", "info");
-  }
-  redrawAll();
-}
-
-function moveSelectedStroke(event) {
-  if (!selectionMode || !selectionDrag || selectionDrag.pointerId !== event.pointerId || !selectedStroke) return;
-  event.preventDefault();
-  const point = normalizedCanvasPoint(event);
-  const dx = point.x - selectionDrag.start.x, dy = point.y - selectionDrag.start.y;
-  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-  for (const item of selectionDrag.points) { minX = Math.min(minX, item.x); maxX = Math.max(maxX, item.x); minY = Math.min(minY, item.y); maxY = Math.max(maxY, item.y); }
-  const limitedX = Math.max(-minX, Math.min(1 - maxX, dx));
-  const limitedY = Math.max(-minY, Math.min(1 - maxY, dy));
-  selectedStroke.points = selectionDrag.points.map((item) => ({ x: item.x + limitedX, y: item.y + limitedY }));
-  redrawAll();
-}
-
-function endStrokeSelection(event) {
-  if (!selectionDrag || selectionDrag.pointerId !== event.pointerId) return;
-  selectionDrag = null;
-  if (drawingCanvas.hasPointerCapture(event.pointerId)) drawingCanvas.releasePointerCapture(event.pointerId);
-  redrawAll();
 }
 
 function drawStroke(stroke) {
@@ -1456,14 +1436,16 @@ function finishStroke(redraw = true) {
   if (currentStroke?.points?.length) strokes.push(currentStroke);
   currentStroke = null;
   drawingActive = false;
-  lastDrawTimestamp = 0;
+  drawingPinchActive = false;
+  drawingGain.reset();
   if (redraw) updateDrawingUI();
 }
 
-function addPoint(point, timestamp = performance.now()) {
+function addPoint(point, { eraser = isEraser, size = brushSize, tool = eraser ? "manual-eraser" : "pen" } = {}) {
   if (!drawEnabled) return;
+  if (currentStroke && (currentStroke.tool !== tool || currentStroke.size !== size)) finishStroke();
   if (!currentStroke) {
-    currentStroke = { color: brushColor, size: brushSize, eraser: isEraser, points: [] };
+    currentStroke = { color: brushColor, size, eraser, tool, points: [] };
     drawingActive = true;
     updateDrawingUI();
   }
@@ -1476,9 +1458,9 @@ function addPoint(point, timestamp = performance.now()) {
     drawSegments(currentStroke, [clamped, { x: clamped.x + 0.001, y: clamped.y + 0.001 }]);
   } else {
     const distance = Math.hypot((clamped.x - previous.x) * rect.width, (clamped.y - previous.y) * rect.height);
-    if (distance > 1.2) {
-      // Fill dropped samples so fast hand motion remains one continuous stroke.
-      const steps = Math.min(80, Math.max(1, Math.ceil(distance / 5)));
+    if (distance > MIN_DRAW_POINT_DISTANCE) {
+      // Interpolate between valid detections so fast movement stays continuous.
+      const steps = Math.min(160, Math.max(1, Math.ceil(distance / 4)));
       const segmentPoints = [previous];
       for (let step = 1; step <= steps; step += 1) {
         const ratio = step / steps;
@@ -1489,24 +1471,22 @@ function addPoint(point, timestamp = performance.now()) {
       drawSegments(currentStroke, segmentPoints);
     }
   }
-  lastDrawTimestamp = timestamp;
-  pausedPoint = null;
 }
 
-function renderLandmarks(ctx, canvas, landmarks, { color = "#26DDF5", active = false, label = null } = {}) {
+function renderLandmarks(ctx, canvas, landmarks, { color = "#26DDF5", active = false, label = null, drawingArea = false } = {}) {
   const width = canvas.getBoundingClientRect().width;
   const height = canvas.getBoundingClientRect().height;
   if (!landmarks) return;
-  const scale = Math.max(width / video.videoWidth, height / video.videoHeight);
-  const renderedWidth = video.videoWidth * scale, renderedHeight = video.videoHeight * scale;
-  const cropX = (renderedWidth - width) / 2, cropY = (renderedHeight - height) / 2;
-  const point = (index) => ({ x: renderedWidth * (1 - landmarks[index].x) - cropX, y: renderedHeight * landmarks[index].y - cropY });
+  const point = (index) => {
+    const mapped = mapCameraPoint(landmarks[index], drawingArea);
+    return { x: width * mapped.x, y: height * mapped.y };
+  };
   ctx.lineWidth = active ? 2 : 1.5; ctx.strokeStyle = color; ctx.fillStyle = color;
   ctx.shadowColor = color; ctx.shadowBlur = active ? 7 : 3;
   for (const [from, to] of CONNECTIONS) { const a = point(from), b = point(to); ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke(); }
   landmarks.forEach((_, index) => { const p = point(index); ctx.beginPath(); ctx.arc(p.x, p.y, index === 8 ? (active ? 5.5 : 4.5) : 2.8, 0, Math.PI * 2); ctx.fillStyle = index === 8 && active ? "#FFCC66" : color; ctx.fill(); });
   const tip = point(8); ctx.beginPath(); ctx.arc(tip.x, tip.y, active ? 11 : 8, 0, Math.PI * 2); ctx.strokeStyle = active ? "rgba(255,204,102,.85)" : color; ctx.stroke();
-  const effectActive = active && (gestureMode === "pinch" ? pinchActive : indexModeActive);
+  const effectActive = active && indexModeActive;
   if (effectActive) {
     ctx.save(); ctx.strokeStyle = "rgba(255,255,255,.74)"; ctx.lineWidth = 1;
     for (let i = 0; i < 12; i += 1) { const angle = (i / 12) * Math.PI * 2; const inner = 15 + (i % 3) * 3; const outer = inner + 7 + (i % 2) * 4; ctx.beginPath(); ctx.moveTo(tip.x + Math.cos(angle) * inner, tip.y + Math.sin(angle) * inner); ctx.lineTo(tip.x + Math.cos(angle) * outer, tip.y + Math.sin(angle) * outer); ctx.stroke(); }
@@ -1525,7 +1505,7 @@ function renderLandmarks(ctx, canvas, landmarks, { color = "#26DDF5", active = f
 function drawLandmarks(hands) {
   for (const [ctx, canvas] of [[landmarkCtx, landmarkCanvas], ...(singleScreen ? [[stageHandCtx, stageHandCanvas]] : [])]) {
     ctx.clearRect(0, 0, canvas.getBoundingClientRect().width, canvas.getBoundingClientRect().height);
-    hands.forEach((hand) => renderLandmarks(ctx, canvas, hand.landmarks, { color: hand.label === "Right" ? "#26DDF5" : "#FF6B91", active: hand.interactive, label: hand.label }));
+    hands.forEach((hand) => renderLandmarks(ctx, canvas, hand.landmarks, { color: hand.label === "Right" ? "#26DDF5" : "#FF6B91", active: hand.interactive, label: hand.label, drawingArea: canvas === stageHandCanvas && activeWorkspace === "draw" }));
   }
   if (!singleScreen) stageHandCtx.clearRect(0, 0, stageHandCanvas.getBoundingClientRect().width, stageHandCanvas.getBoundingClientRect().height);
 }
@@ -1536,8 +1516,8 @@ function updateSingleScreenOverlay() {
   if (stageHandCanvas.parentElement !== destination) destination.appendChild(stageHandCanvas);
   $("stage").classList.toggle("single-model-mode", modelOverlay);
   $("singleModeBtn").setAttribute("aria-pressed", String(singleScreen));
-  $("singleModeBtn").textContent = singleScreen ? "▣ 双屏工作区" : "▣ 单屏工作台";
-  requestAnimationFrame(() => { resizeCanvas(stageHandCanvas, stageHandCtx, false); resizeCanvas(stageVideoCanvas, stageVideoCtx, false); resizeModelViewer(); });
+  $("singleModeBtn").textContent = singleScreen ? "▣ 隐藏手部骨架" : "▣ 显示手部骨架";
+  requestAnimationFrame(() => { resizeCanvas(stageHandCanvas, stageHandCtx, false); resizeModelViewer(); });
 }
 
 function handLabelFromResult(handedness) {
@@ -1549,7 +1529,7 @@ function handLabelFromResult(handedness) {
 
 function assignHandRoles(result) {
   const landmarks = result.landmarks || [];
-  const hands = landmarks.map((points, index) => ({ landmarks: points, label: handLabelFromResult(result.handednesses?.[index]) }));
+  const hands = landmarks.map((points, index) => ({ landmarks: points, worldLandmarks: result.worldLandmarks?.[index], label: handLabelFromResult(result.handednesses?.[index]) }));
   if (hands.length === 1) {
     // A single hand with a temporarily missing handedness category is still a
     // safe interaction target. With two hands we require stable labels below to
@@ -1572,42 +1552,18 @@ function assignHandRoles(result) {
   return { hands, active: null, secondary: null, ambiguous: false };
 }
 
-function drawStageVideo() {
-  const rect = stageVideoCanvas.getBoundingClientRect();
-  if (!singleScreen || !stream || video.readyState < 2 || !rect.width || !rect.height) {
-    stageVideoCtx.clearRect(0, 0, rect.width, rect.height);
-    return;
-  }
-  const videoWidth = video.videoWidth || 1;
-  const videoHeight = video.videoHeight || 1;
-  const canvasRatio = rect.width / rect.height;
-  const videoRatio = videoWidth / videoHeight;
-  let sourceX = 0, sourceY = 0, sourceWidth = videoWidth, sourceHeight = videoHeight;
-  if (videoRatio > canvasRatio) {
-    sourceWidth = videoHeight * canvasRatio;
-    sourceX = (videoWidth - sourceWidth) / 2;
-  } else {
-    sourceHeight = videoWidth / canvasRatio;
-    sourceY = (videoHeight - sourceHeight) / 2;
-  }
-  stageVideoCtx.save();
-  stageVideoCtx.clearRect(0, 0, rect.width, rect.height);
-  stageVideoCtx.translate(rect.width, 0);
-  stageVideoCtx.scale(-1, 1);
-  stageVideoCtx.drawImage(video, sourceX, sourceY, sourceWidth, sourceHeight, 0, 0, rect.width, rect.height);
-  stageVideoCtx.restore();
+function mapCameraPoint(point, drawingArea = false) {
+  const mirroredX = 1 - point.x;
+  if (!drawingArea) return { x: mirroredX, y: point.y };
+  const { left, right, top, bottom } = DRAWING_INPUT_BOUNDS;
+  // Reach the canvas edges while leaving room for the palm inside the camera.
+  return { x: (mirroredX - left) / (right - left), y: (point.y - top) / (bottom - top) };
 }
 
 function mapTipToCanvas(point, canvas) {
   const rect = canvas.getBoundingClientRect();
-  const videoWidth = video.videoWidth || 1;
-  const videoHeight = video.videoHeight || 1;
-  const scale = Math.max(rect.width / videoWidth, rect.height / videoHeight);
-  const renderedWidth = videoWidth * scale;
-  const renderedHeight = videoHeight * scale;
-  const cropX = (renderedWidth - rect.width) / 2;
-  const cropY = (renderedHeight - rect.height) / 2;
-  return { x: (renderedWidth * (1 - point.x) - cropX) / rect.width, y: (renderedHeight * point.y - cropY) / rect.height };
+  if (!rect.width || !rect.height) return { x: 0, y: 0 };
+  return mapCameraPoint(point, activeWorkspace === "draw");
 }
 
 function fingerExtensionAngle(landmarks, mcp, pip, tip) {
@@ -1619,14 +1575,136 @@ function fingerExtensionAngle(landmarks, mcp, pip, tip) {
   return Math.acos(cosine) * 180 / Math.PI;
 }
 
-function updateTracking(landmarks, timestamp, secondaryLandmarks = null) {
+function drawingFingerPipAngle(landmarks, mcp, pip, dip, worldSpace = false) {
+  const base = landmarks[mcp], joint = landmarks[pip], next = landmarks[dip];
+  if (!base || !joint || !next) return NaN;
+  if (worldSpace && [base, joint, next].some((point) => ![point.x, point.y, point.z].every(Number.isFinite))) return NaN;
+  // MediaPipe normalizes x/z by image width and y by image height. Put all
+  // image axes on one scale; world landmarks already use meters on every axis.
+  const yScale = worldSpace ? 1 : (video.videoHeight || 1) / (video.videoWidth || 1);
+  const a = { x: base.x - joint.x, y: (base.y - joint.y) * yScale, z: (base.z ?? 0) - (joint.z ?? 0) };
+  const b = { x: next.x - joint.x, y: (next.y - joint.y) * yScale, z: (next.z ?? 0) - (joint.z ?? 0) };
+  const lengths = Math.hypot(a.x, a.y, a.z) * Math.hypot(b.x, b.y, b.z);
+  if (!Number.isFinite(lengths) || lengths <= Number.EPSILON) return NaN;
+  const cosine = Math.max(-1, Math.min(1, (a.x * b.x + a.y * b.y + a.z * b.z) / lengths));
+  // Discard floating-point noise at the exact gesture thresholds.
+  return Number((Math.acos(cosine) * 180 / Math.PI).toFixed(9));
+}
+
+function drawingFingerAngles(landmarks, worldLandmarks) {
+  const joints = [[5, 6, 7], [9, 10, 11], [13, 14, 15], [17, 18, 19]];
+  // Projected image coordinates distort joint angles near the camera edges.
+  // Use one complete set of world angles, falling back as a group if invalid.
+  if (worldLandmarks?.length === 21) {
+    const angles = joints.map((indices) => drawingFingerPipAngle(worldLandmarks, ...indices, true));
+    if (angles.every(Number.isFinite)) return angles;
+  }
+  return joints.map((indices) => drawingFingerPipAngle(landmarks, ...indices));
+}
+
+function planarFingerPinchRatio(landmarks, tipIndex = 8) {
+  if (landmarks?.length !== 21 || ![0, 4, 5, tipIndex, 9, 17].every((index) => landmarks[index] && [landmarks[index].x, landmarks[index].y].every(Number.isFinite))) return NaN;
+  const yScale = (video.videoHeight || 1) / (video.videoWidth || 1);
+  const distance = (a, b) => Math.hypot(landmarks[a].x - landmarks[b].x, (landmarks[a].y - landmarks[b].y) * yScale);
+  const palmScale = Math.max(distance(5, 17), distance(0, 9) * .65);
+  return palmScale > 1e-6 ? Number((distance(4, tipIndex) / palmScale).toFixed(9)) : NaN;
+}
+
+function drawingPinchMeasurement(landmarks, worldLandmarks) {
+  const measure = (points, worldSpace) => {
+    if (!points || [4, 8, 5, 17].some((index) => !points[index] || ![points[index].x, points[index].y, worldSpace ? points[index].z : points[index].z ?? 0].every(Number.isFinite))) return NaN;
+    const yScale = worldSpace ? 1 : (video.videoHeight || 1) / (video.videoWidth || 1);
+    const distance = (a, b) => Math.hypot(points[a].x - points[b].x, (points[a].y - points[b].y) * yScale, (points[a].z ?? 0) - (points[b].z ?? 0));
+    const palmWidth = distance(5, 17);
+    if (palmWidth <= 1e-6) return NaN;
+    return Number((distance(4, 8) / palmWidth).toFixed(9));
+  };
+  const worldRatio = worldLandmarks?.length === 21 ? measure(worldLandmarks, true) : NaN;
+  const spatialRatio = Number.isFinite(worldRatio) ? worldRatio : measure(landmarks, false);
+  // A rotated palm can look narrow; palm length keeps the image scale usable.
+  const ratio = planarFingerPinchRatio(landmarks);
+  // Estimated fingertip depth is unstable when the pinching fingers occlude.
+  // Keep it visible for diagnosis without letting it break a visible contact.
+  return { ratio, spatialRatio };
+}
+
+function drawingPinchRatio(landmarks, worldLandmarks) {
+  return drawingPinchMeasurement(landmarks, worldLandmarks).ratio;
+}
+
+function drawingHandGeometry(landmarks, worldLandmarks) {
+  const worldValid = worldLandmarks?.length === 21 && worldLandmarks.every((point) => point && [point.x, point.y, point.z].every(Number.isFinite));
+  const source = worldValid ? worldLandmarks : landmarks;
+  const yScale = worldValid ? 1 : (video.videoHeight || 1) / (video.videoWidth || 1);
+  if (source?.length !== 21 || source.some((point) => !point || ![point.x, point.y, point.z ?? 0].every(Number.isFinite))) return null;
+  const points = source.map((point) => new THREE.Vector3(point.x, point.y * yScale, point.z ?? 0));
+  const angle = (a, b, c) => drawingFingerPipAngle(source, a, b, c, worldValid);
+  const pip = [angle(5, 6, 7), angle(9, 10, 11), angle(13, 14, 15), angle(17, 18, 19)];
+  const dip = [angle(6, 7, 8), angle(10, 11, 12), angle(14, 15, 16), angle(18, 19, 20)];
+  const thumb = { mcp: angle(1, 2, 3), ip: angle(2, 3, 4) };
+  const palmWidth = points[5].distanceTo(points[17]);
+  if (palmWidth <= 1e-6 || ![...pip, ...dip].every(Number.isFinite)) return worldValid ? drawingHandGeometry(landmarks, null) : null;
+  return { points, pip, dip, thumb, palmWidth };
+}
+
+function drawingFingersTogether(geometry, first, second, maxGap, minAlignment = .88) {
+  const { points, palmWidth } = geometry;
+  const a = points[first + 3].clone().sub(points[first]).normalize();
+  const b = points[second + 3].clone().sub(points[second]).normalize();
+  if (a.dot(b) < minAlignment) return false;
+  const direction = a.clone().add(b).normalize();
+  const separation = points[first + 3].clone().sub(points[second + 3]);
+  const lateral = separation.clone().addScaledVector(direction, -separation.dot(direction)).length();
+  return lateral / palmWidth <= maxGap;
+}
+
+function classifyDrawingGesture(landmarks, worldLandmarks, continuingEraser = null) {
+  const primary = classifyDrawingGeometry(drawingHandGeometry(landmarks, worldLandmarks), continuingEraser);
+  if (primary.eraser) return { ...primary, geometrySource: "空间" };
+  const projected = landmarks?.map((point) => ({ ...point, z: 0 }));
+  const planar = classifyDrawingGeometry(drawingHandGeometry(projected, null), continuingEraser);
+  // Recheck the visible pose when estimated depth distorts straight fingers.
+  // A finger curled toward the camera can also project to a straight line.
+  // Respect plausible spatial flexion; only replace gross depth/length errors.
+  const required = [0, 1];
+  const spatial = primary.geometry;
+  const fingersSupported = !spatial || required.every((index) => {
+    const base = [5, 9, 13, 17][index];
+    const lengths = [0, 1, 2].map((offset) => spatial.points[base + offset].distanceTo(spatial.points[base + offset + 1]) / spatial.palmWidth);
+    const plausible = lengths.every((length) => length >= .02 && length <= 1.2);
+    return !plausible || spatial.pip[index] >= planar.minPip - 5 && spatial.dip[index] >= planar.minDip - 5;
+  });
+  return planar.eraser && fingersSupported ? { ...planar, geometrySource: "平面" } : primary;
+}
+
+function classifyDrawingGeometry(geometry, continuingEraser) {
+  if (!geometry) return { geometry: null, eraser: null };
+  const { points, pip, dip, thumb, palmWidth } = geometry;
+  const continuing = continuingEraser === "small";
+  const minPip = continuing ? 140 : 150;
+  const minDip = continuing ? 130 : 140;
+  const extended = pip.map((angle, index) => angle >= minPip && dip[index] >= minDip);
+  const palmCenter = points[0].clone().add(points[5]).add(points[9]).add(points[13]).add(points[17]).multiplyScalar(.2);
+  const thumbNearPalm = points[4].distanceTo(palmCenter) / palmWidth;
+  const thumbValid = Number.isFinite(thumb.mcp) && Number.isFinite(thumb.ip);
+  const thumbFolded = thumbValid && thumbNearPalm < (continuing ? 1.15 : 1.05) && (thumb.ip < 155 || thumb.mcp < 150 || thumbNearPalm < .6);
+  const folded = (index) => pip[index] < 150 || dip[index] < 130;
+  const maxGap = continuing ? .5 : .42;
+  const minAlignment = continuing ? .8 : .85;
+  const small = extended[0] && extended[1] && folded(2) && folded(3) && thumbFolded && drawingFingersTogether(geometry, 5, 9, maxGap, minAlignment);
+  const eraser = small ? "small" : null;
+  const hint = !extended[0] || !extended[1] ? "食指、中指需伸直" : !folded(2) || !folded(3) ? "小橡皮：无名指、小指需弯曲" : !thumbFolded ? "小橡皮：拇指需收拢" : "小橡皮：食指、中指需并拢";
+  return { geometry, eraser, thumbFolded, minPip, minDip, hint };
+}
+
+function updateTracking(landmarks, timestamp, secondaryLandmarks = null, worldLandmarks = null) {
+  if (landmarks && (landmarks.length !== 21 || landmarks.some((point) => !point || !Number.isFinite(point.x) || !Number.isFinite(point.y)))) landmarks = null;
   if (!landmarks) {
-    if (handPresent) {
-      missingSince = timestamp;
-      pausedPoint = currentStroke?.points?.at(-1) || null;
-      if (currentStroke) drawGestureHoldUntil = timestamp + STROKE_RESUME_WINDOW_MS;
-    }
-    if (currentStroke && missingSince && timestamp - missingSince > STROKE_RESUME_WINDOW_MS) finishStroke();
+    drawingPinchOwner.reset(); drawingGain.reset();
+    imageWorkflow?.handleTracking({ present: false, timestamp, enabled: drawEnabled, workspace: activeWorkspace });
+    drawingFrameDiagnostics = null;
+    if (currentStroke) finishStroke();
+    resetEraserGesture(); drawingPinchActive = false;
     handPresent = false; smoothedTip = null; pinchActive = false; indexModeActive = false; filterX = null; filterY = null; lastFilterTime = 0;
     lastDepthMeasurement = null;
     $("handValue").textContent = "0 / 2"; $("trackingChipText").textContent = "等待手部"; $("trackingChip").querySelector(".chip-dot").classList.remove("active");
@@ -1635,73 +1713,194 @@ function updateTracking(landmarks, timestamp, secondaryLandmarks = null) {
     resetTwoHandControl();
     applyModelHandControl(null, timestamp);
     updateModelGestureUI();
-    $("tipCursor").classList.remove("visible", "drawing");
-    $("modeBadge").textContent = selectionMode ? "SELECT" : "READY"; $("modeBadge").classList.remove("drawing"); $("drawingStateText").textContent = selectionMode ? selectedStroke ? "已选中 · 可拖动" : "选择/移动模式" : drawEnabled ? "等待手部" : "绘画已暂停";
+    $("tipCursor").classList.remove("visible", "drawing", "erasing");
+    $("modeBadge").textContent = "READY"; $("modeBadge").classList.remove("drawing"); $("drawingStateText").textContent = drawEnabled ? "等待手部" : "绘画已暂停";
     return;
   }
   handPresent = true;
   renderDepthMeasurement(measureRelativeDepth(landmarks, timestamp));
-  const gap = missingSince ? timestamp - missingSince : 0;
-  missingSince = 0;
   const rawTip = { x: landmarks[8].x, y: landmarks[8].y };
   const dt = lastFilterTime ? Math.min(.08, Math.max(1 / 120, (timestamp - lastFilterTime) / 1000)) : 1 / 30;
   if (!filterX) { filterX = new OneEuroFilter(); filterY = new OneEuroFilter(); }
   smoothedTip = { x: filterX.filter(rawTip.x, dt), y: filterY.filter(rawTip.y, dt) };
   lastFilterTime = timestamp;
+  // Keep the steadier filtered point for 3D controls, but reduce drawing lag
+  // by blending in more of the raw tip while the hand is moving quickly.
+  const trackingError = Math.hypot(rawTip.x - smoothedTip.x, rawTip.y - smoothedTip.y);
+  const rawDrawingBlend = Math.min(0.72, 0.35 + trackingError * 8);
+  const drawingTip = {
+    x: smoothedTip.x * (1 - rawDrawingBlend) + rawTip.x * rawDrawingBlend,
+    y: smoothedTip.y * (1 - rawDrawingBlend) + rawTip.y * rawDrawingBlend
+  };
+  const drawingMeasurement = drawingPinchMeasurement(landmarks, worldLandmarks);
+  const selectionPinchRatio = planarFingerPinchRatio(landmarks, 12);
+  const pinchOwner = drawingPinchOwner.update({ indexRatio: drawingMeasurement.ratio, middleRatio: selectionPinchRatio, enabled: drawEnabled && activeWorkspace === "draw" });
+  const workflowTrackingBlocked = imageWorkflow?.handleTracking({ point: mapCameraPoint(drawingTip, true), pinchRatio: drawingMeasurement.ratio, selectionPinchRatio, pinchOwner, timestamp, present: true, enabled: drawEnabled, workspace: activeWorkspace });
+  if (drawingMeasurement.ratio >= DRAW_PINCH_END_RATIO) workflowResumeNeedsRelease = false;
+  const pinchUncertain = pinchOwner === "ambiguous" || pinchOwner === "release";
+  const workflowBlocked = Boolean(workflowTrackingBlocked || imageWorkflow?.isBlocking()) || workflowResumeNeedsRelease || pinchUncertain;
   const width = video.videoWidth || 1, height = video.videoHeight || 1;
   const pinchDistance = Math.hypot((landmarks[4].x - landmarks[8].x) * width, (landmarks[4].y - landmarks[8].y) * height);
   const palmSpan = Math.hypot((landmarks[0].x - landmarks[9].x) * width, (landmarks[0].y - landmarks[9].y) * height);
   const pinchRatio = pinchDistance / Math.max(1, palmSpan);
   pinchActive = pinchActive ? pinchRatio < .42 : pinchRatio < .30;
   const pinching = pinchActive;
-  const indexAngle = fingerExtensionAngle(landmarks, 5, 6, 8);
-  const foldedFingerAngles = [fingerExtensionAngle(landmarks, 9, 10, 12), fingerExtensionAngle(landmarks, 13, 14, 16), fingerExtensionAngle(landmarks, 17, 18, 20)];
-  const modelPose = classifyModelHandPose(landmarks, pinching);
+  if (eraserSession && timestamp - eraserSession.lastValidAt > ERASER_REACQUIRE_MS) eraserSession = null;
+  let classified = classifyDrawingGesture(landmarks, worldLandmarks);
+  if (eraserSession && (!classified.eraser || classified.eraser === eraserSession.kind)) {
+    const continued = classifyDrawingGesture(landmarks, worldLandmarks, eraserSession.kind);
+    if (continued.eraser === eraserSession.kind) classified = continued;
+  }
+  const geometry = classified.geometry;
+  const angles = geometry?.pip || drawingFingerAngles(landmarks, worldLandmarks);
+  const modelPose = workflowBlocked ? "idle" : classifyModelHandPose(landmarks, pinching);
   const twoHandGesture = activeWorkspace === "model" && modelTwoHandMode && secondaryLandmarks && !["select", "whole", "idle"].includes(modelPose);
   if (twoHandGesture) applyTwoHandModelControl(landmarks, secondaryLandmarks, timestamp);
   else {
     resetTwoHandControl();
-    applyModelHandControl(landmarks, timestamp, modelPose);
+    applyModelHandControl(workflowBlocked ? null : landmarks, timestamp, modelPose);
   }
-  const foldedCount = foldedFingerAngles.filter((angle) => angle < 168).length;
-  // Use hysteresis so a small landmark wobble does not repeatedly lift the pen.
-  const indexPose = indexModeActive
-    ? indexAngle > 124 && foldedCount >= 1
-    : indexAngle > 136 && foldedCount >= 2;
-  indexModeActive = indexPose;
-  const poseDrawing = gestureMode === "pinch" ? pinching : indexPose;
-  if (poseDrawing) drawGestureHoldUntil = timestamp + GESTURE_HOLD_MS;
-  const drawingGesture = poseDrawing || timestamp < drawGestureHoldUntil;
-  const drawPoint = mapTipToCanvas(smoothedTip, drawingCanvas);
-  // A small edge tolerance prevents the crop/landmark jitter at the bottom edge
-  // from lifting the pen for a single frame. Points are clamped before drawing.
+  const eraserKind = activeWorkspace === "draw" && drawEnabled && !workflowBlocked ? classified.eraser : null;
+  let eraserReady = false;
+  if (eraserKind) {
+    if (eraserSession && eraserSession.kind !== eraserKind) eraserSession = null;
+    if (!eraserCandidate || eraserCandidate.kind !== eraserKind || timestamp - eraserCandidate.lastAt > 120) {
+      finishStroke();
+      gestureEraser = null;
+      eraserTipFilter = null;
+      eraserCandidate = { kind: eraserKind, since: timestamp, lastAt: timestamp };
+    }
+    eraserCandidate.lastAt = timestamp;
+    eraserReady = eraserSession?.kind === eraserKind || timestamp - eraserCandidate.since >= ERASER_GESTURE_HOLD_MS;
+    if (eraserReady) {
+      gestureEraser = eraserKind;
+      eraserSession = { kind: eraserKind, lastValidAt: timestamp };
+      isEraser = false;
+    }
+  } else if (gestureEraser || eraserCandidate) {
+    // Pause destructive output on rejected frames. Reacquisition starts a new
+    // stroke, so a brief loss never erases across the unobserved movement.
+    finishStroke();
+    gestureEraser = null;
+    eraserCandidate = null;
+    eraserTipFilter = null;
+  }
+  updateToolButtons();
+  const pinchMeasurement = drawingMeasurement;
+  const drawingRatio = pinchMeasurement.ratio;
+  const pinchThreshold = drawingPinchActive ? DRAW_PINCH_END_RATIO : DRAW_PINCH_START_RATIO;
   const edgeTolerance = 0.045;
-  const inCanvas = drawPoint.x >= -edgeTolerance && drawPoint.x <= 1 + edgeTolerance && drawPoint.y >= -edgeTolerance && drawPoint.y <= 1 + edgeTolerance;
+  const drawingTipInView = drawingTip.x >= -edgeTolerance && drawingTip.x <= 1 + edgeTolerance && drawingTip.y >= -edgeTolerance && drawingTip.y <= 1 + edgeTolerance;
+  const drawingGesture = activeWorkspace === "draw" && drawEnabled && pinchOwner === "index" && !workflowBlocked && !eraserKind && drawingTipInView && Number.isFinite(drawingRatio) && drawingRatio < pinchThreshold;
+  drawingPinchActive = drawingGesture;
+  if (drawingGesture) eraserSession = null;
+  indexModeActive = drawingGesture;
+  const tool = eraserReady ? `eraser-${eraserKind}` : drawingGesture ? isEraser ? "manual-eraser" : "pen" : null;
+  const erasing = tool && tool !== "pen";
+  const toolSize = eraserKind ? ERASER_SMALL_SIZE : brushSize;
+  let toolTip = drawingTip;
+  if (eraserKind) {
+    const tips = [8, 12];
+    toolTip = tips.reduce((center, index) => ({ x: center.x + landmarks[index].x / tips.length, y: center.y + landmarks[index].y / tips.length }), { x: 0, y: 0 });
+    if (!eraserTipFilter || eraserTipFilter.kind !== eraserKind) eraserTipFilter = { kind: eraserKind, x: new OneEuroFilter(), y: new OneEuroFilter(), time: timestamp };
+    const eraserDt = Math.min(.08, Math.max(1 / 120, (timestamp - eraserTipFilter.time) / 1000));
+    toolTip = { x: eraserTipFilter.x.filter(toolTip.x, eraserDt), y: eraserTipFilter.y.filter(toolTip.y, eraserDt) };
+    eraserTipFilter.time = timestamp;
+  }
+  if (currentStroke && (currentStroke.tool !== tool || currentStroke.size !== toolSize)) {
+    finishStroke();
+    drawingPinchActive = drawingGesture;
+  }
+  const mappedPoint = mapTipToCanvas(toolTip, drawingCanvas);
+  if (tool !== "pen") drawingGain.reset();
+  const drawPoint = tool === "pen" ? drawingGain.map(mappedPoint) : mappedPoint;
+  // The active drawing area is not a tracking boundary. Keep drawing at the
+  // canvas edge while the fingertip remains inside the full camera frame.
+  const inCameraView = toolTip.x >= -edgeTolerance && toolTip.x <= 1 + edgeTolerance && toolTip.y >= -edgeTolerance && toolTip.y <= 1 + edgeTolerance;
+  drawingFrameDiagnostics = { angles, inCameraView, pinchRatio: drawingRatio, selectionPinchRatio, pinchOwner, spatialPinchRatio: pinchMeasurement.spatialRatio, pinchThreshold, pinchActive: drawingGesture, classified, eraserKind, eraserReady, tool };
   const canvasPoint = { x: Math.max(0, Math.min(1, drawPoint.x)), y: Math.max(0, Math.min(1, drawPoint.y)) };
+  const displayPoint = activeWorkspace === "draw" ? canvasPoint : mapCameraPoint(drawingTip);
   $("handValue").textContent = "已检测";
   const modelGestureActive = activeWorkspace === "model" && modelHandControl && (modelTwoHandActive || ["move", "rotate", "scale"].includes(modelHandPose)) && Boolean(getModelGestureTarget());
-  $("trackingChipText").textContent = activeWorkspace === "model" ? (modelTwoHandActive ? "3D 双手操控" : modelGestureActive ? "3D " + modelPoseLabel(modelHandPose) : modelHandControl ? "3D " + modelPoseLabel(modelHandPose) : "3D 跟踪中") : selectionMode ? "选择/拖动" : drawingGesture ? (gestureMode === "pinch" ? "捏合中" : "食指绘画") : "跟踪中";
+  const gestureLabel = workflowBlocked ? imageWorkflow.isSelecting() ? "截取区域 · 中指松开完成" : imageWorkflow.isOpen() ? "图片编辑预览" : imageWorkflow.isActivating() ? "中指捏合 · 框选准备中" : pinchOwner === "ambiguous" ? "食指/中指接触不明确，请先松开" : "先松开捏合，再继续操作" : eraserKind ? `小号橡皮擦${eraserReady ? "" : "确认中"}` : drawingGesture ? isEraser ? "捏合擦除" : "捏合书写" : "松开停笔";
+  $("trackingChipText").textContent = activeWorkspace === "model" ? (modelTwoHandActive ? "3D 双手操控" : modelGestureActive ? "3D " + modelPoseLabel(modelHandPose) : modelHandControl ? "3D " + modelPoseLabel(modelHandPose) : "3D 跟踪中") : tool || workflowBlocked ? gestureLabel : "跟踪中";
   $("trackingChip").querySelector(".chip-dot").classList.add("active");
-  $("coordinateValue").textContent = `X ${Math.round((1 - smoothedTip.x) * 1000)} / Y ${Math.round(smoothedTip.y * 1000)}`;
-  $("gestureValue").textContent = activeWorkspace === "model" ? (modelHandControl ? (modelTwoHandActive ? "双手操控中" : modelHandPose === "idle" ? (modelParts.length ? "V 字选部件 / 拇指切整体" : "请先加载模型") : modelPoseLabel(modelHandPose) + (modelGestureActive ? "中" : "")) : "3D 手势已关闭") : selectionMode ? "选择并拖动一笔" : drawingGesture ? (gestureMode === "pinch" ? "捏合绘画" : "食指绘画") : (gestureMode === "pinch" ? "手指抬起" : "食指未伸出");
-  $("tipCursor").style.left = `${drawPoint.x * 100}%`; $("tipCursor").style.top = `${drawPoint.y * 100}%`; $("tipCursor").classList.toggle("visible", handPresent); $("tipCursor").classList.toggle("drawing", !selectionMode && drawingGesture && drawEnabled);
-  if (activeWorkspace === "draw" && !selectionMode && drawingGesture && drawEnabled && inCanvas) {
-    // Short detector gaps are recoverable: addPoint() bridges the gap with
-    // interpolated samples. A long gap or a very large jump starts a new stroke.
-    const referencePoint = pausedPoint || currentStroke?.points?.at(-1);
-    const distance = referencePoint && Math.hypot((canvasPoint.x - referencePoint.x) * drawingCanvas.clientWidth, (canvasPoint.y - referencePoint.y) * drawingCanvas.clientHeight);
-    const canvasSize = Math.max(drawingCanvas.clientWidth, drawingCanvas.clientHeight);
-    const sampleGap = lastDrawTimestamp ? Math.max(0, timestamp - lastDrawTimestamp) : 33;
-    // Allow a speed-proportional gap for rapid motion, but keep reacquisition
-    // after a longer hand loss conservative to avoid drawing across the canvas.
-    const speedBasedLimit = Math.min(canvasSize * 1.35, 180 + sampleGap * 5.5);
-    const lostHandSpeed = gap > 0 ? distance / Math.max(.016, sampleGap / 1000) : 0;
-    const hardJump = distance > Math.max(320, speedBasedLimit) || (gap > 0 && lostHandSpeed > 4200);
-    const expiredGap = gap > STROKE_RESUME_WINDOW_MS;
-    if ((expiredGap || hardJump) && currentStroke) finishStroke();
-    addPoint(canvasPoint, timestamp);
+  $("coordinateValue").textContent = `X ${Math.round(displayPoint.x * 1000)} / Y ${Math.round(displayPoint.y * 1000)}`;
+  $("gestureValue").textContent = activeWorkspace === "model" ? (modelHandControl ? (modelTwoHandActive ? "双手操控中" : modelHandPose === "idle" ? (modelParts.length ? "V 字选部件 / 拇指切整体" : "请先加载模型") : modelPoseLabel(modelHandPose) + (modelGestureActive ? "中" : "")) : "3D 手势已关闭") : gestureLabel;
+  const operating = activeWorkspace === "draw" && tool && drawEnabled && inCameraView;
+  $("tipCursor").style.left = `${displayPoint.x * 100}%`; $("tipCursor").style.top = `${displayPoint.y * 100}%`;
+  $("tipCursor").style.width = $("tipCursor").style.height = `${erasing || eraserKind ? toolSize : operating ? 25 : 18}px`;
+  $("tipCursor").classList.toggle("visible", handPresent); $("tipCursor").classList.toggle("drawing", Boolean(operating)); $("tipCursor").classList.toggle("erasing", Boolean(erasing || eraserKind));
+  if (operating) {
+    addPoint(canvasPoint, { eraser: Boolean(erasing), size: toolSize, tool });
+    drawingPinchActive = drawingGesture;
   } else if (drawingActive) finishStroke();
-  if (activeWorkspace === "draw" && !selectionMode && drawingGesture && drawEnabled && inCanvas) { $("modeBadge").textContent = isEraser ? "ERASING" : "DRAWING"; $("modeBadge").classList.add("drawing"); $("drawingStateText").textContent = isEraser ? "正在擦除" : "正在绘画"; } else { $("modeBadge").textContent = selectionMode ? "SELECT" : "READY"; $("modeBadge").classList.remove("drawing"); $("drawingStateText").textContent = activeWorkspace === "model" ? "3D 模型工作区" : selectionMode ? selectedStroke ? "已选中 · 可拖动" : "选择/移动模式" : drawEnabled ? (drawingGesture ? "移出画布范围" : "画布待命") : "绘画已暂停"; }
+  if (operating) { $("modeBadge").textContent = erasing ? "ERASING" : "DRAWING"; $("modeBadge").classList.add("drawing"); $("drawingStateText").textContent = erasing ? `正在擦除 · ${toolSize}px` : "正在绘画"; }
+  else { $("modeBadge").textContent = imageWorkflow?.isSelecting() ? "SELECT" : "READY"; $("modeBadge").classList.remove("drawing"); $("drawingStateText").textContent = activeWorkspace === "model" ? "3D 模型工作区" : !drawEnabled ? "绘画已暂停" : workflowBlocked ? gestureLabel : !inCameraView ? "移出摄像头范围" : "画布待命"; }
+}
+
+function updateCameraDiagnostics(roles, timestamp, processingError = null) {
+  const elapsed = cameraAnalysisStart === null ? 0 : Math.max(0, timestamp - cameraAnalysisStart);
+  const clock = `${String(Math.floor(elapsed / 60000)).padStart(2, "0")}:${(elapsed / 1000 % 60).toFixed(1).padStart(4, "0")}`;
+  $("cameraAnalysisTime").textContent = clock;
+  $("cameraHandLabels").textContent = roles.hands.map((hand) => `${hand.label === "Right" ? "右手" : hand.label === "Left" ? "左手" : "未知"}${hand.interactive ? "（主控）" : ""}`).join(" / ") || "未检测到手";
+  const ids = ["cameraIndexAngle", "cameraMiddleAngle", "cameraRingAngle", "cameraPinkyAngle"];
+  const eraserKind = drawingFrameDiagnostics?.eraserKind;
+  const geometry = drawingFrameDiagnostics?.classified?.geometry;
+  const ratio = drawingFrameDiagnostics?.pinchRatio;
+  const pinchThreshold = drawingFrameDiagnostics?.pinchThreshold ?? DRAW_PINCH_START_RATIO;
+  const ratioValid = Number.isFinite(ratio);
+  $("cameraPinchRatio").textContent = ratioValid ? ratio.toFixed(3) : "--";
+  const spatialRatio = drawingFrameDiagnostics?.spatialPinchRatio;
+  const spatialText = Number.isFinite(spatialRatio) ? spatialRatio.toFixed(3) : "--";
+  const gestureDetail = drawingFrameDiagnostics?.classified?.hint || "等待手部";
+  const eraserState = drawingFrameDiagnostics?.eraserReady ? "已确认" : "确认中";
+  const geometrySource = drawingFrameDiagnostics?.classified?.geometrySource;
+  const selectingRegion = imageWorkflow?.isSelecting() || imageWorkflow?.isActivating();
+  const middleRatio = drawingFrameDiagnostics?.selectionPinchRatio;
+  const pinchOwner = drawingFrameDiagnostics?.pinchOwner;
+  const uncertainPinch = pinchOwner === "ambiguous" || pinchOwner === "release";
+  $("cameraGestureDetail").textContent = uncertainPinch ? `${pinchOwner === "ambiguous" ? "无法区分食指/中指接触" : "等待两组捏合松开"} · 食指 ${ratioValid ? ratio.toFixed(3) : "--"} / 中指 ${Number.isFinite(middleRatio) ? middleRatio.toFixed(3) : "--"}` : selectingRegion ? `中指与拇指：${Number.isFinite(middleRatio) ? middleRatio.toFixed(3) : "--"} · 捏合 <0.24 · 松开 ≥0.40` : eraserKind ? `小橡皮${eraserState}（${geometrySource}） · 平面 ${ratioValid ? ratio.toFixed(3) : "--"} / 空间 ${spatialText}` : `${drawingFrameDiagnostics?.pinchActive ? "捏合已满足" : gestureDetail} · 平面 ${ratioValid ? ratio.toFixed(3) : "--"} / 空间 ${spatialText}`;
+  $("cameraPinchCondition").textContent = eraserKind ? "不限" : `${pinchThreshold === DRAW_PINCH_START_RATIO ? "起笔" : "续画"} <${pinchThreshold.toFixed(2)}`;
+  $("cameraPinchRatioRow").dataset.pass = eraserKind || !ratioValid ? "unknown" : String(ratio < pinchThreshold);
+  const conditionIds = ["cameraIndexCondition", "cameraMiddleCondition", "cameraRingCondition", "cameraPinkyCondition"];
+  const minPip = drawingFrameDiagnostics?.classified?.minPip ?? 150;
+  const minDip = drawingFrameDiagnostics?.classified?.minDip ?? 140;
+  const conditions = eraserKind === "small" ? [`≥${minPip}°`, `≥${minPip}°`, "弯曲", "弯曲"] : Array(4).fill("不限");
+  ids.forEach((id, index) => {
+    const angle = drawingFrameDiagnostics?.angles[index];
+    const valid = Number.isFinite(angle);
+    const passed = !eraserKind ? null : valid && (index < 2 ? angle >= minPip && geometry.dip[index] >= minDip : angle < 150 || geometry.dip[index] < 130);
+    $(conditionIds[index]).textContent = conditions[index];
+    $(id).textContent = valid ? `${angle.toFixed(2)}°${passed === null ? "" : passed ? " ✓" : " ×"}` : "--";
+    $(id + "Row").dataset.pass = passed === null || !valid ? "unknown" : String(passed);
+  });
+  const thumbAngle = geometry?.thumb.ip;
+  const thumbPassed = eraserKind === "small" ? drawingFrameDiagnostics.classified.thumbFolded : null;
+  $("cameraThumbAngle").textContent = Number.isFinite(thumbAngle) ? `${thumbAngle.toFixed(2)}°${thumbPassed === null ? "" : thumbPassed ? " ✓" : " ×"}` : "--";
+  $("cameraThumbCondition").textContent = eraserKind === "small" ? "弯曲收拢" : "不限";
+  $("cameraThumbAngleRow").dataset.pass = thumbPassed === null ? "unknown" : String(thumbPassed);
+  let reason;
+  if (processingError) reason = `检测处理失败：${processingError.message || processingError}`;
+  else if (!stream) reason = "摄像头未启动";
+  else if (!roles.hands.length) reason = "未检测到手";
+  else if (roles.ambiguous) reason = "双手位置或标签不稳定";
+  else if (!roles.active) reason = `主控手不匹配（需要${primaryHand === "Right" ? "右手" : "左手"}）`;
+  else if (activeWorkspace !== "draw") reason = "3D 工作区";
+  else if (!drawEnabled) reason = "绘画已暂停";
+  else if (imageWorkflow?.isSelecting()) reason = "正在框选，绘画与橡皮擦暂停";
+  else if (imageWorkflow?.isActivating()) reason = "中指捏合确认中，即将进入框选";
+  else if (imageWorkflow?.isOpen()) reason = "图片编辑预览，绘画已暂停";
+  else if (uncertainPinch) reason = pinchOwner === "ambiguous" ? "食指/中指接触不明确，请先松开" : "切换捏合前请先松开";
+  else if (eraserKind && !drawingFrameDiagnostics.eraserReady) reason = `小号橡皮擦手势确认中`;
+  else if (!drawingFrameDiagnostics?.inCameraView) reason = "指尖超出摄像头范围";
+  else if (!eraserKind && !ratioValid) reason = "捏合关键点无效，已暂停";
+  else reason = !drawingFrameDiagnostics?.tool ? "松开捏合，已停笔" : drawingFrameDiagnostics.tool !== "pen" ? `正在擦除 · ${eraserKind === "small" ? "小号" : "手动"}` : "正在绘画";
+  const drawing = reason === "正在绘画" || reason.startsWith("正在擦除");
+  $("cameraPenReason").textContent = reason;
+  $("cameraPenReason").dataset.state = drawing ? "drawing" : "paused";
+  if (cameraAnalysisWasDrawing && !drawing) $("cameraLastPenLift").textContent = `${clock} ${reason}`;
+  cameraAnalysisWasDrawing = drawing;
 }
 
 async function loadModel() {
@@ -1730,8 +1929,12 @@ async function startCamera() {
     await loadModel();
     stream = await navigator.mediaDevices.getUserMedia({ video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 60, max: 60 }, facingMode: "user" }, audio: false });
     video.srcObject = stream; await video.play();
+    $("videoWrap").style.aspectRatio = `${video.videoWidth || 16} / ${video.videoHeight || 9}`;
+    cameraAnalysisStart = performance.now(); cameraAnalysisWasDrawing = false;
+    $("cameraLastPenLift").textContent = "--";
+    resizeAll();
     $("cameraPlaceholder").classList.add("hidden"); $("stopCameraBtn").disabled = false; $("liveBadge").textContent = "LIVE"; $("liveBadge").classList.add("on"); setHeaderStatus("摄像头运行中", true);
-    setStatus(gestureMode === "pinch" ? "摄像头已连接。捏合拇指与食指落笔，松开后可移动到新位置。" : "摄像头已连接。伸出食指落笔，弯曲食指后可移动到新位置。");
+    setStatus("摄像头已连接。拇指与食指捏合书写、分开停笔；五指并拢大擦除，食指与中指并拢小擦除。");
     lastVideoTime = -1; scheduleNextFrame();
   } catch (error) {
     console.error("[Air Drawing] Camera/model startup failed:", error);
@@ -1741,11 +1944,13 @@ async function startCamera() {
 }
 
 function stopCamera() {
+  imageWorkflow?.cancelSelection();
   if (frameLoopMode === "video" && frameCallbackId !== null && video.cancelVideoFrameCallback) video.cancelVideoFrameCallback(frameCallbackId);
   if (frameLoopMode === "raf" && animationId !== null) cancelAnimationFrame(animationId);
   animationId = null; frameCallbackId = null; frameLoopMode = null;
   if (stream) stream.getTracks().forEach((track) => track.stop()); stream = null; video.srcObject = null;
-  finishStroke(); landmarkCtx.clearRect(0, 0, landmarkCanvas.width, landmarkCanvas.height); stageVideoCtx.clearRect(0, 0, stageVideoCanvas.getBoundingClientRect().width, stageVideoCanvas.getBoundingClientRect().height); resetDepthMeasurement(false); updateTracking(null);
+  finishStroke(); landmarkCtx.clearRect(0, 0, landmarkCanvas.width, landmarkCanvas.height); resetDepthMeasurement(false); updateTracking(null);
+  updateCameraDiagnostics({ hands: [], active: null, ambiguous: false }, performance.now());
   $("cameraPlaceholder").classList.remove("hidden"); $("startCameraBtn").disabled = false; $("stopCameraBtn").disabled = true; $("liveBadge").textContent = "OFFLINE"; $("liveBadge").classList.remove("on"); setHeaderStatus("摄像头未连接"); setStatus("摄像头已停止。点击启动摄像头重新开始。");
 }
 
@@ -1756,10 +1961,10 @@ function processFrame(now) {
       const result = handLandmarker.detectForVideo(video, now);
       const roles = assignHandRoles(result);
       if (roles.ambiguous || (roles.hands.length && !roles.active)) {
-        finishStroke(); pausedPoint = null; drawGestureHoldUntil = 0;
+        finishStroke();
         lastModelHandTip = null; modelHandGesture = null; resetTwoHandControl();
       }
-      drawStageVideo(); drawLandmarks(roles.hands); updateTracking(roles.active?.landmarks || null, now, roles.secondary?.landmarks || null);
+      drawLandmarks(roles.hands); updateTracking(roles.active?.landmarks || null, now, roles.secondary?.landmarks || null, roles.active?.worldLandmarks || null);
       const count = roles.hands.length;
       $("handValue").textContent = `${count} / 2`;
       if (roles.ambiguous) {
@@ -1773,8 +1978,14 @@ function processFrame(now) {
       } else if (roles.active && count > 1) {
         $("trackingChipText").textContent = `${primaryHand === "Right" ? "右" : "左"}手主控 · 双手已分离`;
       }
+      updateCameraDiagnostics(roles, now);
       lastVideoTime = video.currentTime; fpsFrameCount++;
-    } catch (error) { console.error("[Air Drawing] Frame detection failed:", error); }
+    } catch (error) {
+      console.error("[Air Drawing] Frame detection failed:", error);
+      // Never connect a later valid sample to a stroke left by failed inference.
+      updateTracking(null, now);
+      updateCameraDiagnostics({ hands: [], active: null, ambiguous: false }, now, error);
+    }
   }
   const elapsed = now - fpsWindowStart; if (elapsed >= 1000) { $("fpsValue").textContent = Math.round(fpsFrameCount * 1000 / elapsed); fpsFrameCount = 0; fpsWindowStart = now; }
   scheduleNextFrame();
@@ -1791,25 +2002,24 @@ function scheduleNextFrame() {
   }
 }
 
+imageWorkflow = createImageWorkflow({
+  canvas: drawingCanvas, doc: document, window,
+  fetchImpl: (path, init) => fetch(`${HYPER3D_API_BASE}${path}`, init),
+  finishDrawing: () => { finishStroke(); resetEraserGesture(); drawingPinchActive = false; workflowResumeNeedsRelease = true; },
+  setStatus,
+  onUseFor3D: prepareRegionForHyper3D
+});
+$("clearHyper3dSketchBtn")?.addEventListener("click", () => { hyper3dSketchSource = null; updateHyper3DInputMode(); updateHyper3DImageNames(); });
+
 $("startCameraBtn").addEventListener("click", startCamera); $("stopCameraBtn").addEventListener("click", stopCamera);
+$("consoleToggleBtn").addEventListener("click", () => setConsoleCollapsed(!$("controlRail").hidden));
 $("penBtn").addEventListener("click", () => setTool("pen")); $("eraserBtn").addEventListener("click", () => setTool("eraser"));
-$("selectStrokeBtn").addEventListener("click", () => setTool("select"));
-drawingCanvas.addEventListener("pointerdown", beginStrokeSelection);
-drawingCanvas.addEventListener("pointermove", moveSelectedStroke);
-drawingCanvas.addEventListener("pointerup", endStrokeSelection);
-drawingCanvas.addEventListener("pointercancel", endStrokeSelection);
-document.querySelectorAll("[data-gesture-mode]").forEach((button) => button.addEventListener("click", () => {
-  gestureMode = button.dataset.gestureMode;
-  finishStroke();
-  indexModeActive = false; pinchActive = false; drawGestureHoldUntil = 0;
-  updateGestureModeUI();
-  setStatus(gestureMode === "pinch" ? "已切换为捏合绘画模式。" : "已切换为食指绘画模式，效果与视频一致。", "info");
-}));
 $("singleModeBtn").addEventListener("click", () => {
+  imageWorkflow?.cancelSelection();
   singleScreen = !singleScreen;
   $("stage").classList.toggle("single-mode", singleScreen);
   updateSingleScreenOverlay();
-  setStatus(singleScreen ? (activeWorkspace === "model" ? "3D 单屏工作台已启用：识别到的手部骨架叠加在模型画面上。" : "单屏工作台已启用：手部骨架与笔迹叠加在摄像头画面上。") : "已恢复双屏工作区。", "info");
+  setStatus(singleScreen ? (activeWorkspace === "model" ? "3D 单屏工作台已启用：识别到的手部骨架叠加在模型画面上。" : "手部骨架已叠加到绘画画布上。") : "手部骨架叠加已隐藏。", "info");
   requestAnimationFrame(resizeAll);
 });
 $("drawWorkspaceBtn").addEventListener("click", () => setActiveWorkspace("draw"));
@@ -1859,31 +2069,46 @@ $("framePartBtn").addEventListener("click", frameSelectedModel);
 $("explodePartBtn").addEventListener("click", explodeSelectedModel);
 $("removeAllPartsBtn").addEventListener("click", () => { modelParts.forEach(disposeModelPart); modelParts = []; selectedModelObject = null; showModelSelectionHelper(null); resetModelAssemblyTransform(); modelTransform?.detach(); $("modelViewerPlaceholder")?.classList.remove("hidden"); updateScenePartList(); updateSelectedPartLabel(); updateModelGestureUI(); setStatus("已移除场景中的全部部件。", "info"); });
 $("modelHandControlBtn").addEventListener("click", () => { modelHandControl = !modelHandControl; lastModelHandTip = null; modelMoveAnchor = null; modelHandGesture = false; modelHandPose = "idle"; modelGestureCandidate = null; modelGestureCandidateFrames = 0; modelSelectionCommitted = false; resetTwoHandControl(); $("modelHandControlBtn").setAttribute("aria-pressed", String(modelHandControl)); $("modelHandControlBtn").textContent = modelHandControl ? "✋ 关闭 3D 手势" : "✋ 启用 3D 手势"; $("modelHandCursor").classList.remove("visible"); updateTransformAttachment(); if (modelHandControl) { modelOrbit.enabled = false; setStatus("3D 手势已启用：" + (primaryHand === "Right" ? "右" : "左") + "手 V 字选件、单指移动、握拳旋转、捏合缩放、竖拇指切整体；张掌或放松停止。" + (modelTwoHandMode ? " 双手高级模式已开启。" : ""), "info"); } else { modelOrbit.enabled = true; setStatus("3D 手势已关闭，可使用鼠标和变换手柄操作。", "info"); } updateModelGestureUI(); });
-$("drawToggleBtn").addEventListener("click", () => { drawEnabled = !drawEnabled; if (!drawEnabled) finishStroke(); $("drawToggleBtn").setAttribute("aria-pressed", String(drawEnabled)); $("drawToggleLabel").textContent = drawEnabled ? "绘画已启用" : "绘画已暂停"; setStatus(drawEnabled ? "绘画模式已启用。" : "绘画模式已暂停。", "info"); });
-$("undoBtn").addEventListener("click", () => { finishStroke(); strokes.pop(); selectedStroke = null; redrawAll(); setStatus(strokes.length ? "已撤销上一笔。" : "没有可撤销的笔画。"); });
-$("clearBtn").addEventListener("click", () => { finishStroke(); strokes = []; selectedStroke = null; redrawAll(); setStatus("画布已清空。", "info"); });
+$("drawToggleBtn").addEventListener("click", () => { imageWorkflow?.cancelSelection(); drawEnabled = !drawEnabled; finishStroke(); resetEraserGesture(); $("drawToggleBtn").setAttribute("aria-pressed", String(drawEnabled)); $("drawToggleLabel").textContent = drawEnabled ? "绘画已启用" : "绘画已暂停"; setStatus(drawEnabled ? "绘画模式已启用。" : "绘画模式已暂停。", "info"); });
+$("undoBtn").addEventListener("click", () => { imageWorkflow?.cancelSelection(); finishStroke(); resetEraserGesture(); strokes.pop(); redrawAll(); setStatus(strokes.length ? "已撤销上一笔。" : "没有可撤销的笔画。"); });
+$("clearBtn").addEventListener("click", () => { imageWorkflow?.cancelSelection(); finishStroke(); resetEraserGesture(); strokes = []; redrawAll(); setStatus("画布已清空。", "info"); });
 $("depthCalibrateBtn").addEventListener("click", calibrateDepth);
+$("cameraAnalysisToggle").addEventListener("change", (event) => {
+  imageWorkflow?.cancelSelection();
+  finishStroke();
+  resetEraserGesture();
+  $("cameraAnalysis").hidden = !event.target.checked;
+  $("canvasLayout").classList.toggle("camera-analysis-visible", event.target.checked);
+  requestAnimationFrame(() => { resizeAll(); resizeModelViewer(); });
+});
+$("cameraSkeletonToggle").addEventListener("change", (event) => {
+  landmarkCanvas.hidden = !event.target.checked;
+  if (event.target.checked) resizeCanvas(landmarkCanvas, landmarkCtx, false);
+});
 $("primaryHandSelect").addEventListener("change", (event) => {
+  imageWorkflow?.cancelSelection();
   primaryHand = event.target.value;
   finishStroke();
+  resetEraserGesture();
   lastModelHandTip = null; modelMoveAnchor = null; modelHandGesture = false; modelHandPose = "idle"; modelGestureCandidate = null; modelGestureCandidateFrames = 0;
   updateModelGestureUI();
   setStatus(`交互主手已切换为${primaryHand === "Right" ? "右手" : "左手"}；另一只手只显示骨架，不会绘画或控制模型。`, "info");
 });
 $("handLabelToggle").addEventListener("click", (event) => {
+  imageWorkflow?.cancelSelection();
   swapHandLabels = !swapHandLabels;
   event.currentTarget.setAttribute("aria-pressed", String(swapHandLabels));
   event.currentTarget.textContent = `左右手标签：${swapHandLabels ? "已反转" : "正常"}`;
   finishStroke();
+  resetEraserGesture();
   lastModelHandTip = null; modelHandGesture = false; modelHandPose = "idle"; modelGestureCandidate = null; modelGestureCandidateFrames = 0; resetTwoHandControl();
   setStatus(swapHandLabels ? "左右手标签已反转，请按画面标签重新选择主手。" : "左右手标签已恢复正常。", "info");
 });
 $("brushSize").addEventListener("input", (event) => { brushSize = Number(event.target.value); $("sizeValue").textContent = `${brushSize} px`; });
 document.querySelectorAll(".swatch").forEach((button) => button.addEventListener("click", () => { brushColor = button.dataset.color; $("colorPicker").value = brushColor; $("colorValue").textContent = brushColor; document.querySelectorAll(".swatch").forEach((item) => item.classList.toggle("active", item === button)); }));
 $("colorPicker").addEventListener("input", (event) => { brushColor = event.target.value.toUpperCase(); $("colorValue").textContent = brushColor; document.querySelectorAll(".swatch").forEach((item) => item.classList.remove("active")); });
-resizeObserver = new ResizeObserver(() => { resizeAll(); resizeModelViewer(); }); resizeObserver.observe($("videoWrap")); resizeObserver.observe($("drawingCanvas")); resizeObserver.observe($("stageHandCanvas")); resizeObserver.observe($("modelViewer")); window.addEventListener("resize", () => { resizeAll(); resizeModelViewer(); }); resizeAll();
+resizeObserver = new ResizeObserver(() => { resizeAll(); resizeModelViewer(); }); resizeObserver.observe($("videoWrap")); resizeObserver.observe($("drawingCanvas")); resizeObserver.observe($("stageHandCanvas")); resizeObserver.observe($("modelViewer")); window.addEventListener("resize", () => { imageWorkflow?.cancelSelection(); resizeAll(); resizeModelViewer(); }); resizeAll();
 updateSingleScreenOverlay();
-updateGestureModeUI();
 updateHyper3DInputMode();
 refreshHyper3DConfig();
 window.addEventListener("beforeunload", stopCamera);

@@ -2,12 +2,14 @@ import http from "node:http";
 import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { createImageEditService, IMAGE_EDIT_REQUEST_LIMIT, ImageEditError } from "./image-edit-service.mjs";
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 8000);
 const API_ORIGIN = "https://api.hyper3d.com";
 const MAX_API_BODY = 55 * 1024 * 1024;
 const MAX_MODEL_BYTES = 240 * 1024 * 1024;
+const imageEditService = createImageEditService();
 const MIME_TYPES = {
   ".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8", ".js": "text/javascript; charset=utf-8",
   ".mjs": "text/javascript; charset=utf-8", ".json": "application/json; charset=utf-8", ".task": "application/octet-stream",
@@ -48,15 +50,15 @@ async function readBody(request, limit = MAX_API_BODY) {
     else chunks.push(chunk);
   }
   if (tooLarge) {
-    const error = new Error("请求文件过大（上限 55 MB）。");
+    const error = new Error(`请求内容过大（上限 ${Math.ceil(limit / (1024 * 1024))} MB）。`);
     error.status = 413;
     throw error;
   }
   return Buffer.concat(chunks, length);
 }
 
-async function parseJsonBody(request) {
-  const raw = await readBody(request, 64 * 1024);
+async function parseJsonBody(request, limit = 64 * 1024) {
+  const raw = await readBody(request, limit);
   try { return JSON.parse(raw.toString("utf8")); }
   catch {
     const error = new Error("请求 JSON 格式无效。");
@@ -115,7 +117,7 @@ function requireLocalOrigin(request, response) {
     if (originUrl.host.toLowerCase() !== requestHost.host.toLowerCase() || !isLoopbackHost(originUrl.hostname)) throw new Error("origin mismatch");
     return true;
   } catch {
-    sendJson(response, 403, { error: "INVALID_LOCAL_ORIGIN", message: "Hyper3D API 请求必须来自此电脑上的本地应用页面。" });
+    sendJson(response, 403, { error: "INVALID_LOCAL_ORIGIN", message: "API 请求必须来自此电脑上的本地应用页面。" });
     return false;
   }
 }
@@ -153,10 +155,23 @@ async function fetchGeneratedFile(request, response, requestUrl) {
 }
 
 async function handleApi(request, response, url) {
+  if (request.method === "GET" && url.pathname === "/api/image-edit/config") {
+    return sendJson(response, 200, imageEditService.configuration());
+  }
   if (request.method === "GET" && url.pathname === "/api/hyper3d/config") {
     return sendJson(response, 200, { available: Boolean(process.env.RODIN_API_KEY?.trim()), provider: "Hyper3D Rodin Gen-2.5", server: "local" });
   }
   if (request.method === "POST" && !requireLocalOrigin(request, response)) return;
+  if (request.method === "POST" && url.pathname === "/api/image-edit") {
+    if ((request.headers["content-type"] || "").split(";")[0].trim().toLowerCase() !== "application/json") return sendJson(response, 415, { error: "JSON_REQUIRED", message: "图像编辑请求必须使用 application/json。" });
+    const payload = await parseJsonBody(request, IMAGE_EDIT_REQUEST_LIMIT);
+    return sendJson(response, 200, await imageEditService.edit(payload));
+  }
+  if (request.method === "POST" && url.pathname === "/api/image-edit/prompt") {
+    if ((request.headers["content-type"] || "").split(";")[0].trim().toLowerCase() !== "application/json") return sendJson(response, 415, { error: "JSON_REQUIRED", message: "AI 起草请求必须使用 application/json。" });
+    const payload = await parseJsonBody(request, IMAGE_EDIT_REQUEST_LIMIT);
+    return sendJson(response, 200, await imageEditService.draftPrompt(payload));
+  }
   if (request.method === "POST" && url.pathname === "/api/hyper3d/generate") {
     const contentType = request.headers["content-type"] || "";
     if (!contentType.toLowerCase().startsWith("multipart/form-data;") || !contentType.includes("boundary=")) return sendJson(response, 400, { error: "MULTIPART_REQUIRED", message: "生成请求必须使用 multipart/form-data。" });
@@ -182,11 +197,13 @@ async function serveStatic(request, response, url) {
   const relativePath = pathname === "/" ? "index.html" : pathname.replace(/^\/+/, "");
   const target = path.resolve(ROOT, relativePath);
   if (target !== ROOT && !target.startsWith(`${ROOT}${path.sep}`)) return sendJson(response, 403, { error: "FORBIDDEN" });
-  if (path.basename(target).startsWith(".") || ["server.mjs", ".env"].includes(path.basename(target))) return sendJson(response, 404, { error: "NOT_FOUND" });
+  if (path.basename(target).startsWith(".") || ["server.mjs", "image-edit-service.mjs", ".env"].includes(path.basename(target))) return sendJson(response, 404, { error: "NOT_FOUND" });
   try {
     const info = await stat(target);
     if (!info.isFile()) return sendJson(response, 404, { error: "NOT_FOUND" });
-    response.writeHead(200, { "Content-Type": MIME_TYPES[path.extname(target).toLowerCase()] || "application/octet-stream", "Content-Length": info.size, "X-Content-Type-Options": "nosniff" });
+    const headers = { "Content-Type": MIME_TYPES[path.extname(target).toLowerCase()] || "application/octet-stream", "Content-Length": info.size, "X-Content-Type-Options": "nosniff" };
+    if (["index.html", "styles.css", "app.js", "image-workflow.js", "pinch-owner.js"].includes(relativePath)) headers["Cache-Control"] = "no-store";
+    response.writeHead(200, headers);
     response.end(await readFile(target));
   } catch (error) {
     if (error.code === "ENOENT") return sendJson(response, 404, { error: "NOT_FOUND" });
@@ -205,6 +222,7 @@ const server = http.createServer(async (request, response) => {
     if (request.method !== "GET" && request.method !== "HEAD") return sendJson(response, 405, { error: "METHOD_NOT_ALLOWED" });
     return await serveStatic(request, response, url);
   } catch (error) {
+    if (error instanceof ImageEditError) return sendJson(response, error.status, { error: error.code, message: error.message, ...(error.details ? { details: error.details } : {}) });
     console.error("[Air Drawing] Request failed:", error.message);
     sendJson(response, error.status || 500, { error: "REQUEST_FAILED", message: error.message || "请求处理失败。" });
   }
@@ -213,4 +231,5 @@ const server = http.createServer(async (request, response) => {
 server.listen(PORT, "127.0.0.1", () => {
   console.log(`Air Drawing running at http://localhost:${PORT}`);
   console.log(`Hyper3D API key: ${process.env.RODIN_API_KEY?.trim() ? "configured" : "not configured (add it to .env to enable generation)"}`);
+  console.log(`Seedream image editing: ${imageEditService.configuration().available ? "configured" : "not configured (set SEEDREAM_API_KEY and SEEDREAM_MODEL in .env)"}`);
 });

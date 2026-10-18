@@ -7,7 +7,8 @@
   "scripts": {
     "start": "node server.mjs",
     "dev": "node server.mjs",
-    "check": "node --check app.js && node --check server.mjs",
+    "check": "node --check app.js && node --check pinch-owner.js && node --check image-workflow.js && node --check image-edit-service.mjs && node --check server.mjs",
+    "test": "node scripts/test-drawing-gestures.mjs && node scripts/test-image-workflow.mjs && node scripts/test-image-edit-service.mjs && node scripts/test-image-edit-routes.mjs",
     "catalog": "node scripts/build_model_catalog.mjs"
   },
   "engines": {
