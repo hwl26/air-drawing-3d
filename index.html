@@ -151,7 +151,7 @@
                       <button class="model-primary-button" id="addModelModuleBtn" type="button" disabled>添加到当前场景</button>
                       <button class="model-mini-button" id="replaceModelModuleBtn" type="button" disabled>清空后加载</button>
                     </div>
-                    <p class="module-start-guide"><strong>开始操作：</strong>加载后启用 3D 手势 → V 字悬停选部件 → 单食指移动、握拳旋转、捏合缩放；竖拇指切整体，张掌或放松停手。</p>
+                    <p class="module-start-guide"><strong>开始操作：</strong>加载后启用 3D 手势 → 小拇指进入选择模式 → 伸出食指指向并停留选部件 → 张掌退出；单食指移动、握拳旋转、捏合缩放。</p>
                   </div>
                   <div class="model-panel-block">
                     <div class="model-block-heading"><strong>模型库</strong><span id="catalogCount">加载中…</span></div>
@@ -170,16 +170,20 @@
                     <div class="scene-toolbar"><div class="transform-modes" role="group" aria-label="鼠标变换手柄模式"><button class="transform-mode active" data-transform-mode="translate" type="button" title="鼠标变换手柄：移动">移</button><button class="transform-mode" data-transform-mode="rotate" type="button" title="鼠标变换手柄：旋转">转</button><button class="transform-mode" data-transform-mode="scale" type="button" title="鼠标变换手柄：缩放">缩</button></div><div class="scene-toolbar-actions"><button class="model-mini-button active" id="screenAxisToggle" type="button" aria-pressed="true" title="显示相对屏幕的参考坐标轴">屏幕坐标轴</button><button class="model-mini-button" id="resetViewBtn" type="button">重置视角</button></div></div>
                     <div class="model-tuning"><label for="modelSensitivity">灵敏度 <strong id="modelSensitivityValue">0.65×</strong></label><input id="modelSensitivity" type="range" min="0.25" max="1.25" step="0.05" value="0.65"><label for="modelSmoothing">防抖平滑 <strong id="modelSmoothingValue">65%</strong></label><input id="modelSmoothing" type="range" min="0" max="90" step="5" value="65"><p>建议从默认值开始；抖动时把平滑提高到 75–85%；物体响应太快时把灵敏度降到 0.45–0.60×；拖动迟缓再小幅提高。</p></div>
                     <label class="model-two-hand-toggle" for="modelTwoHandMode"><input id="modelTwoHandMode" type="checkbox"><span><strong>双手高级模式</strong><small>两手同时捏合：中心平移 · 距离缩放 · 夹角滚转</small></span></label>
+                    <div class="model-voice-control" role="group" aria-label="语音模式控制">
+                      <button class="model-mini-button" id="voiceModeBtn" type="button" aria-pressed="false">◉ 开启语音模式</button>
+                      <span id="voiceModeState">语音未启用 · 说“移动、旋转、缩放、选择、整体或停止”</span>
+                    </div>
                     <div class="scene-actions pose-actions"><button class="model-mini-button" id="resetModelTargetBtn" type="button" disabled>复位目标</button><button class="model-mini-button" id="resetAllModelBtn" type="button" disabled>复位全部</button></div>
                     <div class="scene-actions selection-actions"><button class="model-mini-button" id="selectAllModelBtn" type="button" disabled>全选部件</button><button class="model-mini-button" id="clearModelSelectionBtn" type="button" disabled>取消多选</button></div>
                     <div class="scene-actions pose-actions"><button class="model-mini-button" id="saveModelPoseBtn" type="button" disabled>保存状态</button><button class="model-mini-button" id="restoreModelPoseBtn" type="button" title="当前部件组合还没有保存状态" disabled>恢复保存</button></div>
                     <div class="scene-actions"><button class="model-mini-button" id="explodePartBtn" type="button" title="单次拆分动作，不会由捏合松开触发" disabled>拆分观察</button><button class="model-mini-button" id="removeAllPartsBtn" type="button" disabled>移除全部</button></div>
-                    <p class="model-start-guide"><strong>手势：</strong>V 字指向并停留选部件；单食指移动；握拳左右绕屏幕 Y 轴、上下绕屏幕 X 轴旋转；拇指与食指捏合后上下移动缩放；竖起拇指切换到整体模型。张掌或放松手指即停。</p>
+                    <p class="model-start-guide"><strong>手势：</strong>小拇指单独伸直进入并锁定选择模式；随后伸出食指指向部件并停留约 0.4 秒确认，食指此时只负责射线选取不会移动模型；张掌保持约 0.5 秒退出选择进入安全中立。退出后单食指移动、握拳旋转、拇指与食指捏合缩放，竖起拇指切换整体模型。</p>
                     <div class="scene-part-list" id="scenePartList"><div class="scene-empty">添加一个或多个部件后，可在此选择、隐藏或拆分观察。</div></div>
                   </div>
                 </aside>
                 <div class="model-view-column">
-                  <div class="model-toolbar"><div><strong id="selectedPartName">尚未加载模型</strong><span id="modelViewerHint">启用手势后，V 字选部件；单指移、握拳转、捏合缩放。</span><div class="model-gesture-strip"><span id="modelGestureState">鼠标 / 变换手柄</span><span>V字选件 · 单指移 · 握拳转 · 捏合缩 · 竖拇指整体</span></div></div><div class="model-toolbar-actions"><button class="model-mini-button hand-control-button" id="modelHandControlBtn" type="button" aria-pressed="false">✋ 启用 3D 手势</button><button class="model-mini-button" id="framePartBtn" type="button" disabled>聚焦部件</button><button class="model-mini-button" id="frameAllBtn" type="button" disabled>显示全部</button></div></div>
+                  <div class="model-toolbar"><div><strong id="selectedPartName">尚未加载模型</strong><span id="modelViewerHint">启用手势后，小拇指进选择；食指指向选部件；单指移、握拳转、捏合缩放。</span><div class="model-gesture-strip"><span id="modelGestureState">鼠标 / 变换手柄</span><span>小拇指选模式 · 食指选件 · 单指移 · 握拳转 · 捏合缩</span></div></div><div class="model-toolbar-actions"><button class="model-mini-button hand-control-button" id="modelHandControlBtn" type="button" aria-pressed="false">✋ 启用 3D 手势</button><button class="model-mini-button" id="framePartBtn" type="button" disabled>聚焦部件</button><button class="model-mini-button" id="frameAllBtn" type="button" disabled>显示全部</button></div></div>
                   <div class="model-viewer" id="modelViewer">
                     <div class="model-viewer-placeholder" id="modelViewerPlaceholder"><span class="model-placeholder-mark">◇</span><strong>3D 解剖工作台</strong><p>先从左侧快速模块开始，或搜索 FJ 编号 / 解剖名称后添加部件。</p><small>鼠标拖拽旋转视角 · 滚轮缩放 · 右键平移</small></div>
                     <div class="model-hand-cursor" id="modelHandCursor" aria-hidden="true"><i></i><span></span></div>

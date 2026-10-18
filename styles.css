@@ -147,6 +147,11 @@ button:disabled { cursor: not-allowed; opacity: .42; }
 .model-two-hand-toggle span { display: grid; gap: 3px; }
 .model-two-hand-toggle strong { font-size: 9px; }
 .model-two-hand-toggle small { color: var(--muted); font-size: 8px; line-height: 1.35; }
+.model-voice-control { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 7px; margin-top: 9px; padding: 7px 8px; border: 1px solid var(--line); background: rgba(189,157,255,.045); }
+.model-voice-control .model-mini-button { white-space: nowrap; min-height: 28px; }
+.model-voice-control .model-mini-button[aria-pressed="true"] { color: #d3b9ff; border-color: rgba(189,157,255,.7); background: rgba(189,157,255,.1); }
+.model-voice-control span { min-width: 0; color: var(--muted); font-size: 8px; line-height: 1.4; }
+.model-voice-control[data-active="true"] span { color: #d3b9ff; }
 .scene-part-list { display: grid; gap: 4px; margin-top: 10px; max-height: 230px; overflow: auto; }
 .scene-part-row { display: flex; gap: 4px; align-items: stretch; border: 1px solid transparent; background: rgba(145, 173, 207, .045); }
 .scene-part-row.selected { border-color: rgba(84, 230, 192, .55); background: rgba(84, 230, 192, .09); }

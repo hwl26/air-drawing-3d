@@ -14,6 +14,7 @@ const WASM_URL = "./vendor/mp/wasm";
 const CONNECTIONS = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,11],[11,12],[9,13],[13,14],[14,15],[15,16],[13,17],[17,18],[18,19],[19,20],[0,17]];
 const STROKE_RESUME_WINDOW_MS = 420;
 const GESTURE_HOLD_MS = 240;
+const MODEL_NEUTRAL_HOLD_MS = 500;
 
 const $ = (id) => document.getElementById(id);
 const video = $("video");
@@ -104,6 +105,14 @@ let modelSelectionGroup = null;
 let modelParts = [];
 let transformMode = "translate";
 let modelHandControl = false;
+let modelVoiceMode = null;
+let modelVoiceNeedsRearm = false;
+let voiceRecognition = null;
+let voiceRecognitionRunning = false;
+let modelPinkySelectionActive = false;
+let modelSelectionNeedsNeutral = false;
+let modelNeutralSince = 0;
+let modelNeutralArmed = true;
 let lastModelHandTip = null;
 let modelHandGesture = null;
 let modelHandPose = "idle";
@@ -731,7 +740,7 @@ async function loadCatalogParts(parts, { replace = false, label = "选中部件"
     if (moduleObjects.length > 1) selectModelObjects(moduleObjects);
     frameModelObjects(moduleObjects);
     updateScenePartList(); updateSelectedPartLabel();
-    setStatus(`${replace ? "已清空旧场景并加载" : "已加入"} ${loaded} 个${label}。启用 3D 手势后可用 V 字选件、单指移动、握拳旋转、捏合缩放。`, "info");
+    setStatus(`${replace ? "已清空旧场景并加载" : "已加入"} ${loaded} 个${label}。启用 3D 手势后可用小拇指进入选择、食指指向选件、单指移动、握拳旋转、捏合缩放。`, "info");
   } catch (error) {
     console.error("[Air Drawing] OBJ load failed:", error);
     setStatus(`OBJ 加载失败：${error.message || "未知错误"}`, "error");
@@ -879,7 +888,7 @@ async function importHyper3DResult(item, button) {
     const response = await fetch(proxyUrl);
     if (!response.ok) { const payload = await response.json().catch(() => ({})); throw new Error(payload.message || `模型下载失败（HTTP ${response.status}）`); }
     const record = await addGeneratedGLB(await response.arrayBuffer(), item.name);
-    setStatus(`已将 Hyper3D 模型 ${record.name} 导入场景。启用手势后可用 V 字选件或竖拇指切换整体。`, "info");
+    setStatus(`已将 Hyper3D 模型 ${record.name} 导入场景。启用手势后可用小拇指进入选择、食指指向选件或竖拇指切换整体。`, "info");
     button.textContent = `✓ 已导入 ${item.name}`;
   } catch (error) {
     console.error("[Air Drawing] Hyper3D import failed:", error); button.disabled = false; button.textContent = `重试导入 ${item.name}`; setHyper3DTaskState(error.message || "模型导入失败。", "error");
@@ -910,32 +919,160 @@ async function generateHyper3D() {
 }
 
 function setActiveWorkspace(workspace) {
-  activeWorkspace = workspace; const model = workspace === "model"; document.body.classList.toggle("model-workspace-active", model); $("drawingPane").hidden = model; $("modelWorkspacePane").hidden = !model; $("drawWorkspaceBtn").classList.toggle("active", !model); $("modelWorkspaceBtn").classList.toggle("active", model); $("drawWorkspaceBtn").setAttribute("aria-selected", String(!model)); $("modelWorkspaceBtn").setAttribute("aria-selected", String(model)); updateSingleScreenOverlay(); lastModelHandTip = null; modelHandGesture = false; modelHandPose = "idle"; modelGestureCandidate = null; modelGestureCandidateFrames = 0; updateModelGestureUI(); if (model) { createModelViewer(); loadModelCatalog(); requestAnimationFrame(() => { resizeModelViewer(); startModelRenderLoop(); }); } else { stopModelRenderLoop(); finishStroke(); } setStatus(model ? "3D 解剖工作台已启用。开启手势后可用姿势选择、移动、旋转和缩放模型。" : "隔空绘画工作台已启用。", "info"); }
+  activeWorkspace = workspace; const model = workspace === "model"; document.body.classList.toggle("model-workspace-active", model); $("drawingPane").hidden = model; $("modelWorkspacePane").hidden = !model; $("drawWorkspaceBtn").classList.toggle("active", !model); $("modelWorkspaceBtn").classList.toggle("active", model); $("drawWorkspaceBtn").setAttribute("aria-selected", String(!model)); $("modelWorkspaceBtn").setAttribute("aria-selected", String(model)); updateSingleScreenOverlay(); lastModelHandTip = null; modelHandGesture = false; modelHandPose = "idle"; modelGestureCandidate = null; modelGestureCandidateFrames = 0; modelSelectionNeedsNeutral = false; modelNeutralSince = 0; modelNeutralArmed = !modelHandControl; modelPinkySelectionActive = false; updateModelGestureUI(); if (model) { createModelViewer(); loadModelCatalog(); requestAnimationFrame(() => { resizeModelViewer(); startModelRenderLoop(); }); } else { stopModelRenderLoop(); finishStroke(); } setStatus(model ? "3D 解剖工作台已启用。开启手势后可用姿势选择、移动、旋转和缩放模型。" : "隔空绘画工作台已启用。", "info"); }
 
 function modelPoseLabel(pose = modelHandPose) {
-  return ({ idle: "中立 / 停止", select: "V 字选部件", move: "单指移动", rotate: "握拳旋转", scale: "捏合缩放", whole: "整体模型", twoHand: "双手操控" })[pose] || "中立 / 停止";
+  return ({ idle: "张掌中立 / 停止", select: "选择部件", selectArm: "小拇指进入选择", move: "单指移动", rotate: "握拳旋转", scale: "捏合缩放", whole: "整体模型", twoHand: "双手操控" })[pose] || "张掌中立 / 停止";
+}
+
+const voiceModeLabels = { idle: "停止 / 安全中立", select: "选择", move: "移动", rotate: "旋转", scale: "缩放", whole: "整体模型" };
+
+function updateVoiceModeUI() {
+  const button = $("voiceModeBtn");
+  const state = $("voiceModeState");
+  if (!button || !state) return;
+  button.setAttribute("aria-pressed", String(voiceRecognitionRunning));
+  button.textContent = voiceRecognitionRunning ? "◉ 关闭语音模式" : "◉ 开启语音模式";
+  button.closest(".model-voice-control")?.setAttribute("data-active", String(voiceRecognitionRunning));
+  if (!voiceRecognitionRunning) {
+    state.textContent = "语音未启用 · 说“移动、旋转、缩放、选择、整体或停止”";
+    return;
+  }
+  const mode = modelVoiceMode ? `当前锁定：${voiceModeLabels[modelVoiceMode]}` : "等待指令";
+  state.textContent = `${mode} · 可说“停止”停手，关闭语音恢复手势识别`;
+}
+
+function setVoiceModelMode(mode, transcript = "") {
+  if (!voiceModeLabels[mode]) return;
+  if (!modelHandControl) {
+    setStatus("请先启用 3D 手势，再用语音锁定操作模式。", "error");
+    return;
+  }
+  modelVoiceMode = mode;
+  modelVoiceNeedsRearm = false;
+  modelHandPose = "idle";
+  modelHandGesture = false;
+  modelGestureCandidate = null;
+  modelGestureCandidateFrames = 0;
+  modelMoveAnchor = null;
+  modelMoveTransition = null;
+  modelMoveInput = null;
+  lastModelHandTip = null;
+  modelSelectionCommitted = false;
+  modelPinkySelectionActive = mode === "select";
+  modelNeutralArmed = true;
+  if (mode === "select") setModelTargetScope("part");
+  if (mode === "whole") setModelTargetScope("whole");
+  if (mode === "idle") modelPinkySelectionActive = false;
+  resetTwoHandControl();
+  updateVoiceModeUI();
+  updateModelGestureUI();
+  const heard = transcript ? `（识别到“${transcript}”）` : "";
+  setStatus(`语音已锁定${voiceModeLabels[mode]}模式${heard}；说“停止”可停手。`, "info");
+}
+
+function handleVoiceTranscript(transcript) {
+  const text = String(transcript || "").toLowerCase().replace(/[，。！？、,.!?]/g, "");
+  const mode = text.includes("停止") || text.includes("中立") || text.includes("放松")
+    ? "idle"
+    : text.includes("选择") || text.includes("选中") || text.includes("选取")
+      ? "select"
+      : text.includes("移动") || text.includes("拖动") || text.includes("平移")
+        ? "move"
+        : text.includes("旋转") || text.includes("转动") || text.includes("转")
+          ? "rotate"
+          : text.includes("缩放") || text.includes("放大") || text.includes("缩小")
+            ? "scale"
+            : text.includes("整体") || text.includes("全体")
+              ? "whole"
+              : null;
+  if (mode) setVoiceModelMode(mode, transcript);
+  else setStatus(`未识别语音指令“${transcript}”；可说移动、旋转、缩放、选择、整体或停止。`, "error");
+}
+
+function toggleVoiceRecognition() {
+  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SpeechRecognition) {
+    console.warn("[Air Drawing] 当前浏览器不支持 Web Speech Recognition。");
+    setStatus("当前浏览器不支持语音识别，请使用 Chrome 或 Edge。", "error");
+    return;
+  }
+  if (voiceRecognitionRunning) {
+    voiceRecognitionRunning = false;
+    voiceRecognition?.stop();
+    modelVoiceMode = null;
+    modelVoiceNeedsRearm = false;
+    modelPinkySelectionActive = false;
+    modelHandPose = "idle";
+    modelHandGesture = false;
+    lastModelHandTip = null;
+    resetTwoHandControl();
+    updateVoiceModeUI();
+    updateModelGestureUI();
+    setStatus("语音模式已关闭；手势恢复自动识别。", "info");
+    return;
+  }
+  if (!voiceRecognition) {
+    voiceRecognition = new SpeechRecognition();
+    voiceRecognition.lang = "zh-CN";
+    voiceRecognition.continuous = true;
+    voiceRecognition.interimResults = false;
+    voiceRecognition.maxAlternatives = 1;
+    voiceRecognition.onresult = (event) => {
+      for (let index = event.resultIndex; index < event.results.length; index++) {
+        if (event.results[index].isFinal) handleVoiceTranscript(event.results[index][0]?.transcript || "");
+      }
+    };
+    voiceRecognition.onerror = (event) => {
+      console.warn("[Air Drawing] 语音识别错误：", event.error);
+      if (["not-allowed", "service-not-allowed"].includes(event.error)) {
+        voiceRecognitionRunning = false;
+        modelVoiceMode = null;
+        modelVoiceNeedsRearm = false;
+        updateVoiceModeUI();
+        setStatus("麦克风权限被拒绝，请允许浏览器使用麦克风后重试。", "error");
+      }
+    };
+    voiceRecognition.onend = () => {
+      if (!voiceRecognitionRunning) return;
+      try { voiceRecognition.start(); }
+      catch (error) { console.warn("[Air Drawing] 语音识别重启失败：", error); }
+    };
+  }
+  voiceRecognitionRunning = true;
+  updateVoiceModeUI();
+  try {
+    voiceRecognition.start();
+    setStatus("语音模式已开启。请说“移动、旋转、缩放、选择、整体”或“停止”。", "info");
+  } catch (error) {
+    voiceRecognitionRunning = false;
+    updateVoiceModeUI();
+    console.warn("[Air Drawing] 无法启动语音识别：", error);
+    setStatus("语音识别启动失败，请检查麦克风权限后重试。", "error");
+  }
 }
 
 function updateModelGestureUI() {
   const state = $("modelGestureState"); const strip = state?.closest(".model-gesture-strip");
   if (!state) return;
   const targetName = modelTargetScope === "whole" ? "整体模型" : "选中部件";
-  state.textContent = !modelHandControl ? "鼠标 / 变换手柄" : (modelTwoHandActive ? "双手" : (primaryHand === "Right" ? "右手" : "左手")) + "主控 · " + targetName + " · " + (modelTwoHandActive ? modelPoseLabel("twoHand") : modelPoseLabel());
+  const voiceLabel = modelVoiceMode ? ` · 语音锁定${voiceModeLabels[modelVoiceMode]}` : "";
+  state.textContent = !modelHandControl ? "鼠标 / 变换手柄" : (modelTwoHandActive ? "双手" : (primaryHand === "Right" ? "右手" : "左手")) + "主控 · " + targetName + " · " + (modelTwoHandActive ? modelPoseLabel("twoHand") : modelPoseLabel()) + voiceLabel;
   strip?.classList.toggle("active", modelHandControl);
   document.body.classList.toggle("model-hand-control-active", modelHandControl && activeWorkspace === "model");
+  updateVoiceModeUI();
 }
 
 function classifyModelHandPose(landmarks, pinching) {
   // Perspective and hand tilt can make a truly straight finger measure below
-  // 138 degrees. Use a tolerant extension threshold here and keep the V pose
-  // distinct by requiring the ring and little fingers to remain folded.
+  // 138 degrees. Use a tolerant extension threshold and keep commands mutually
+  // exclusive so a pointing hand cannot become a selection command.
   const palmScale = Math.hypot(landmarks[0].x - landmarks[9].x, landmarks[0].y - landmarks[9].y, (landmarks[0].z || 0) - (landmarks[9].z || 0));
   const middleTipReach = Math.hypot(landmarks[12].x - landmarks[9].x, landmarks[12].y - landmarks[9].y, (landmarks[12].z || 0) - (landmarks[9].z || 0));
   const index = fingerExtensionAngle(landmarks, 5, 6, 8) > 112;
   // Keep a tolerant middle-finger estimate for the non-selection poses, then
-  // use a stricter test below for V selection. With an oblique camera view a
-  // curled middle finger can have a misleading joint angle and must not steal
-  // an index-pointing movement as a V gesture.
+  // With an oblique camera view a curled middle finger can have a misleading
+  // joint angle and must not steal an index-pointing movement.
   const middle = fingerExtensionAngle(landmarks, 9, 10, 12) > 112 && middleTipReach > palmScale * .78;
   const ring = fingerExtensionAngle(landmarks, 13, 14, 16) > 135;
   const pinky = fingerExtensionAngle(landmarks, 17, 18, 20) > 135;
@@ -945,15 +1082,14 @@ function classifyModelHandPose(landmarks, pinching) {
   const thumbUp = landmarks[4].y < landmarks[3].y + .06;
   const foldedCount = [index, middle, ring, pinky].filter((extended) => !extended).length;
   const fistClosed = !index && !middle && !ring && !pinky;
-  // Selection wins over pinch so a V pose is not stolen by a transient thumb
-  // landmark error. A raised thumb is a one-shot target-scope command.
-  const middleClearlyExtended = fingerExtensionAngle(landmarks, 9, 10, 12) > 138 && middleTipReach > palmScale * 1.02;
-  const vGap = Math.hypot(landmarks[8].x - landmarks[12].x, landmarks[8].y - landmarks[12].y);
-  const vPose = index && middleClearlyExtended && !ring && !pinky && vGap > palmScale * .32;
-  if (vPose) return "select";
+  // A single extended little finger is the selection-mode latch. The index is
+  // intentionally folded here; after confirmation it is used only as a ray
+  // pointer and can no longer enter move mode.
+  const pinkySelectArm = pinky && !index && !middle && !ring && (!thumbOpen || !thumbUp);
+  if (pinkySelectArm) return "selectArm";
   // A thumb command must be unambiguous: the thumb is extended while all four
   // fingers are folded.  Using `>= 3` made an index+thumb pose look like a
-  // whole-model switch for a few frames while the V gesture was settling.
+  // whole-model switch for a few frames while the thumb command was settling.
   if (!pinching && thumbOpen && thumbUp && foldedCount === 4) return "whole";
   // A closed fist is the deliberate rotation clutch.  The thumb and index
   // tips can become close together naturally when the hand closes, so test
@@ -966,12 +1102,13 @@ function classifyModelHandPose(landmarks, pinching) {
 }
 
 function modelPoseConfirmMs(pose) {
-  return ({ idle: 120, scale: 140, move: 90, rotate: 170, select: 85, whole: 180 })[pose] ?? 150;
+  return ({ idle: 120, scale: 140, move: 90, rotate: 170, select: 180, selectArm: 180, whole: 180 })[pose] ?? 150;
 }
 
 function modelPoseConfirmFrames(pose) {
   if (pose === "move") return 3;
-  if (pose === "select") return 2;
+  if (pose === "select") return 3;
+  if (pose === "selectArm") return 3;
   return pose === "whole" ? 5 : 4;
 }
 
@@ -1003,7 +1140,7 @@ function applyTwoHandModelControl(primaryLandmarks, secondaryLandmarks, timestam
   const target = getModelGestureTarget();
   if (!target) {
     resetTwoHandControl();
-    $("modelViewerHint").textContent = "双手模式已启用 · 请先用 V 字选中部件或竖起拇指切换整体";
+    $("modelViewerHint").textContent = "双手模式已启用 · 请先用小拇指进入选择并用食指选中部件，或竖起拇指切换整体";
     return true;
   }
   const first = normalizedPalmPoint(primaryLandmarks);
@@ -1063,7 +1200,7 @@ function applyTwoHandModelControl(primaryLandmarks, secondaryLandmarks, timestam
   return true;
 }
 
-function applyModelHandControl(landmarks, timestamp, pose = "idle") {
+function applyModelHandControl(landmarks, timestamp, pose = "idle", pointerReady = true) {
   if (activeWorkspace !== "model" || !modelRenderer) return;
   // Releasing a pinch often briefly resembles the one-finger move pose. Require
   // a neutral/open pause before accepting another action to prevent accidental
@@ -1071,10 +1208,10 @@ function applyModelHandControl(landmarks, timestamp, pose = "idle") {
   // user can switch from scaling to rotation without the old pinch state
   // swallowing the fist gesture.
   if (modelHandPose === "scale" && pose !== "scale" && pose !== "idle" && pose !== "rotate") pose = "idle";
-  // Keep a confirmed V selection alive through a noisy landmark frame. The
+  // Keep a confirmed selection alive through a noisy landmark frame. The
   // middle finger can briefly fall below the extension threshold while the
   // hand moves, which otherwise interrupts the hover timer or changes mode.
-  if (modelHandPose === "select" && (pose === "idle" || pose === "move") && timestamp < modelSelectGraceUntil) pose = "select";
+  if (modelHandPose === "select" && !modelPinkySelectionActive && (pose === "idle" || pose === "move") && timestamp < modelSelectGraceUntil) pose = "select";
   if (pose === "select") modelSelectGraceUntil = timestamp + 140;
   // Keep the model cursor more responsive than the drawing cursor: blend a
   // little raw fingertip into the filtered point so fast movement does not lag
@@ -1093,7 +1230,9 @@ function applyModelHandControl(landmarks, timestamp, pose = "idle") {
   const cursor = $("modelHandCursor");
   if (!tip || !modelHandControl) {
     cursor.classList.remove("visible"); cursor.removeAttribute("data-pose");
-    lastModelHandTip = null; modelHandGesture = false; modelHandPose = "idle"; modelGestureCandidate = null; modelGestureCandidateFrames = 0; modelMoveAnchor = null; modelMoveTransition = null; modelMoveInput = null;
+    lastModelHandTip = null; modelHandGesture = false; modelHandPose = "idle"; modelGestureCandidate = null; modelGestureCandidateFrames = 0; modelMoveAnchor = null; modelMoveTransition = null; modelMoveInput = null; modelSelectionNeedsNeutral = false; modelPinkySelectionActive = false; modelNeutralSince = 0;
+    modelNeutralArmed = false;
+    if (modelVoiceMode && modelVoiceMode !== "idle") modelVoiceNeedsRearm = true;
     modelHoverPart = null; modelSelectionCommitted = false; modelPoseLostAt = timestamp;
     resetTwoHandControl();
     return;
@@ -1101,6 +1240,16 @@ function applyModelHandControl(landmarks, timestamp, pose = "idle") {
   cursor.style.left = (tip.x * 100) + "%"; cursor.style.top = (tip.y * 100) + "%"; cursor.classList.add("visible"); cursor.dataset.pose = pose;
   if (pose !== modelGestureCandidate) { modelGestureCandidate = pose; modelGestureCandidateSince = timestamp; modelGestureCandidateFrames = 1; }
   else modelGestureCandidateFrames += 1;
+  if (!modelNeutralArmed && pose !== "idle") {
+    modelHandGesture = false;
+    lastModelHandTip = tip;
+    modelMoveTransition = null;
+    modelMoveInput = null;
+    const progress = modelNeutralSince ? Math.min(100, Math.round((timestamp - modelNeutralSince) / MODEL_NEUTRAL_HOLD_MS * 100)) : 0;
+    $("modelViewerHint").textContent = `安全中立确认中 · 张掌保持 ${progress}%`;
+    updateModelGestureUI();
+    return;
+  }
   // Require both elapsed time and several consecutive frames so a brief
   // landmark wobble cannot switch operation modes. Pending changes pause motion.
   if (pose !== modelHandPose && modelGestureCandidateFrames >= modelPoseConfirmFrames(pose) && timestamp - modelGestureCandidateSince >= modelPoseConfirmMs(pose)) {
@@ -1108,13 +1257,21 @@ function applyModelHandControl(landmarks, timestamp, pose = "idle") {
     modelHandPose = pose;
     if (pose === "idle" && previousPose === "scale") modelScaleJustReleased = true;
     if (pose === "scale") modelScaleJustReleased = false;
+    if (pose === "idle") {
+      modelSelectionNeedsNeutral = false;
+      modelPinkySelectionActive = false;
+      if (previousPose !== "idle") {
+        modelNeutralSince = timestamp;
+        modelNeutralArmed = false;
+      }
+    }
     modelGestureStart = { x: tip.x, y: tip.y, timestamp };
     modelMoveAnchor = null; modelMoveTransition = null; modelMoveInput = null;
     lastModelHandTip = pose === "scale" ? zoomPoint : pose === "rotate" ? rotatePoint : tip; modelHandGesture = false; modelDeltaX = 0; modelDeltaY = 0; modelGestureTimestamp = timestamp;
     modelHoverPart = null; modelHoverSince = timestamp; modelSelectionCommitted = false;
     if (pose === "select" && previousPose !== "select") modelSelectEntryId += 1;
     modelPoseLostAt = pose === "idle" ? timestamp : 0;
-    if (pose === "select") setModelTargetScope("part");
+    if (pose === "select") { setModelTargetScope("part"); modelSelectionNeedsNeutral = true; }
     if (pose === "whole") setModelTargetScope("whole");
     updateModelGestureUI();
   }
@@ -1124,6 +1281,15 @@ function applyModelHandControl(landmarks, timestamp, pose = "idle") {
     return;
   }
   if (pose === "select") {
+    if (!pointerReady) {
+      modelHandGesture = false;
+      lastModelHandTip = tip;
+      modelMoveTransition = null;
+      modelMoveInput = null;
+      $("modelViewerHint").textContent = "选择模式已锁定 · 伸出食指指向部件并停留约 0.4 秒";
+      updateModelGestureUI();
+      return;
+    }
     const pointer = new THREE.Vector2(tip.x * 2 - 1, 1 - tip.y * 2);
     const candidates = raycastModelParts(pointer) || [];
     const candidateKey = candidates.map((object) => modelParts.find((part) => part.object === object)?.id || object.uuid).join("|");
@@ -1146,18 +1312,18 @@ function applyModelHandControl(landmarks, timestamp, pose = "idle") {
       if (hovered) showModelSelectionHelper(hovered);
       else showModelSelectionHelper(selectedModelObject);
     }
-    const progress = hovered ? Math.min(1, Math.max(0, (timestamp - modelHoverSince) / 320)) : 0;
+    const progress = hovered ? Math.min(1, Math.max(0, (timestamp - modelHoverSince) / 400)) : 0;
     cursor.style.setProperty("--select-progress", (progress * 360) + "deg");
     if (hovered && progress >= 1 && !modelSelectionCommitted) {
       selectModelObject(hovered); modelSelectionCommitted = true;
       modelLastSelectPoint = { x: tip.x, y: tip.y }; modelLastSelectKey = candidateKey;
       const record = modelParts.find((part) => part.object === hovered);
-      const overlapHint = modelPickCandidates.length > 1 ? `（此处有 ${modelPickCandidates.length} 个重叠部件；再次做 V 字可轮换）` : "";
-      setStatus("已选中 " + (record?.name || "模型部件") + overlapHint + "；单指移动、握拳旋转、捏合缩放。", "info");
+      const overlapHint = modelPickCandidates.length > 1 ? `（此处有 ${modelPickCandidates.length} 个重叠部件；张掌退出后重新用小拇指进入可轮换）` : "";
+      setStatus("已选中 " + (record?.name || "模型部件") + overlapHint + "；张掌退出选择，单指移动、握拳旋转、捏合缩放。", "info");
     }
     $("modelViewerHint").textContent = hovered
-      ? (modelPickCandidates.length > 1 ? `重叠部件 ${modelPickIndex + 1}/${modelPickCandidates.length} · ${modelSelectionCommitted ? "已选中；再次做 V 字可轮换" : "保持指向 · " + Math.round(progress * 100) + "%"}` : (modelSelectionCommitted ? "部件已选中 · 单指移动、握拳旋转、捏合缩放" : "指向部件并保持 · " + Math.round(progress * 100) + "%"))
-      : "V 字手势：将指尖移到要选的部件上并停留约 0.3 秒。";
+      ? (modelPickCandidates.length > 1 ? `重叠部件 ${modelPickIndex + 1}/${modelPickCandidates.length} · ${modelSelectionCommitted ? "已选中；张掌退出后重新用小拇指进入可轮换" : "保持指向 · " + Math.round(progress * 100) + "%"}` : (modelSelectionCommitted ? "部件已选中 · 张掌退出后可单指移动、握拳旋转、捏合缩放" : "指向部件并保持 · " + Math.round(progress * 100) + "%"))
+      : "小拇指伸直进入选择模式；随后伸出食指，将指尖移到部件上并停留约 0.4 秒。";
     updateModelGestureUI();
     return;
   }
@@ -1169,13 +1335,16 @@ function applyModelHandControl(landmarks, timestamp, pose = "idle") {
   }
   if (pose === "idle") {
     modelHandGesture = false; lastModelHandTip = tip; modelDeltaX = 0; modelDeltaY = 0; modelMoveAnchor = null; modelMoveTransition = null; modelMoveInput = null;
-    $("modelViewerHint").textContent = modelScaleJustReleased ? "缩放已暂停 · 放松手片刻，再次捏合并上下移动可继续调整" : modelTargetScope === "part" && !selectedModelObject ? "V 字手势选中部件，或用鼠标列表选择" : "当前目标：" + (modelTargetScope === "whole" ? "整体模型" : "选中部件") + " · 做出手势开始操作，放松手指停止";
+    if (!modelNeutralArmed && !modelNeutralSince) modelNeutralSince = timestamp;
+    if (!modelNeutralArmed && modelNeutralSince && timestamp - modelNeutralSince >= MODEL_NEUTRAL_HOLD_MS) modelNeutralArmed = true;
+    const neutralText = modelNeutralArmed ? "安全中立已确认 · 可以切换下一种手势" : `安全中立确认中 · 张掌保持 ${Math.min(100, Math.round((timestamp - modelNeutralSince) / MODEL_NEUTRAL_HOLD_MS * 100))}%`;
+    $("modelViewerHint").textContent = modelScaleJustReleased ? "缩放已暂停 · " + neutralText : modelTargetScope === "part" && !selectedModelObject ? "小拇指进入选择，食指指向选中部件，或用鼠标列表选择 · " + neutralText : "当前目标：" + (modelTargetScope === "whole" ? "整体模型" : "选中部件") + " · " + neutralText;
     updateModelGestureUI(); return;
   }
   const target = getModelGestureTarget();
   if (!target) {
     modelHandGesture = false; lastModelHandTip = tip; modelMoveTransition = null; modelMoveInput = null;
-    $("modelViewerHint").textContent = "请先用 V 字手势选中部件，或举起拇指切换到整体模型。";
+    $("modelViewerHint").textContent = "请先用小拇指进入选择并用食指选中部件，或举起拇指切换到整体模型。";
     updateModelGestureUI(); return;
   }
   // Movement uses the index tip, scaling uses the palm anchor, and rotation
@@ -1883,12 +2052,25 @@ function updateTracking(landmarks, timestamp, secondaryLandmarks = null) {
   const pinching = pinchActive;
   const indexAngle = fingerExtensionAngle(landmarks, 5, 6, 8);
   const foldedFingerAngles = [fingerExtensionAngle(landmarks, 9, 10, 12), fingerExtensionAngle(landmarks, 13, 14, 16), fingerExtensionAngle(landmarks, 17, 18, 20)];
-  const modelPose = classifyModelHandPose(landmarks, pinching);
+  const detectedModelPose = classifyModelHandPose(landmarks, pinching);
+  const modelPose = activeWorkspace === "model" && modelVoiceMode && !modelVoiceNeedsRearm
+    ? modelVoiceMode
+    : modelPinkySelectionActive && detectedModelPose !== "idle"
+      ? "select"
+      : detectedModelPose === "selectArm" ? "select" : detectedModelPose;
+  const selectionPointerReady = modelVoiceMode === "select"
+    || (modelPinkySelectionActive ? ["move", "select"].includes(detectedModelPose) : detectedModelPose !== "selectArm");
   const twoHandGesture = activeWorkspace === "model" && modelTwoHandMode && secondaryLandmarks && !["select", "whole", "idle"].includes(modelPose);
   if (twoHandGesture) applyTwoHandModelControl(landmarks, secondaryLandmarks, timestamp);
   else {
     resetTwoHandControl();
-    applyModelHandControl(landmarks, timestamp, modelPose);
+    applyModelHandControl(landmarks, timestamp, modelPose, selectionPointerReady);
+  }
+  if (detectedModelPose === "selectArm" && modelHandPose === "select") modelPinkySelectionActive = true;
+  if (modelVoiceNeedsRearm && detectedModelPose === "idle" && modelNeutralArmed) {
+    modelVoiceNeedsRearm = false;
+    modelHandPose = "idle";
+    updateVoiceModeUI();
   }
   const foldedCount = foldedFingerAngles.filter((angle) => angle < 168).length;
   // Use hysteresis so a small landmark wobble does not repeatedly lift the pen.
@@ -1910,7 +2092,7 @@ function updateTracking(landmarks, timestamp, secondaryLandmarks = null) {
   $("trackingChipText").textContent = activeWorkspace === "model" ? (modelTwoHandActive ? "3D 双手操控" : modelGestureActive ? "3D " + modelPoseLabel(modelHandPose) : modelHandControl ? "3D " + modelPoseLabel(modelHandPose) : "3D 跟踪中") : selectionMode ? "选择/拖动" : drawingGesture ? (gestureMode === "pinch" ? "捏合中" : "食指绘画") : "跟踪中";
   $("trackingChip").querySelector(".chip-dot").classList.add("active");
   $("coordinateValue").textContent = `X ${Math.round((1 - smoothedTip.x) * 1000)} / Y ${Math.round(smoothedTip.y * 1000)}`;
-  $("gestureValue").textContent = activeWorkspace === "model" ? (modelHandControl ? (modelTwoHandActive ? "双手操控中" : modelHandPose === "idle" ? (modelParts.length ? "V 字选部件 / 拇指切整体" : "请先加载模型") : modelPoseLabel(modelHandPose) + (modelGestureActive ? "中" : "")) : "3D 手势已关闭") : selectionMode ? "选择并拖动一笔" : drawingGesture ? (gestureMode === "pinch" ? "捏合绘画" : "食指绘画") : (gestureMode === "pinch" ? "手指抬起" : "食指未伸出");
+  $("gestureValue").textContent = activeWorkspace === "model" ? (modelHandControl ? (modelTwoHandActive ? "双手操控中" : modelHandPose === "idle" ? (modelParts.length ? "小拇指选模式 / 食指选件 / 拇指切整体" : "请先加载模型") : modelPoseLabel(modelHandPose) + (modelGestureActive ? "中" : "")) : "3D 手势已关闭") : selectionMode ? "选择并拖动一笔" : drawingGesture ? (gestureMode === "pinch" ? "捏合绘画" : "食指绘画") : (gestureMode === "pinch" ? "手指抬起" : "食指未伸出");
   $("tipCursor").style.left = `${drawPoint.x * 100}%`; $("tipCursor").style.top = `${drawPoint.y * 100}%`; $("tipCursor").classList.toggle("visible", handPresent); $("tipCursor").classList.toggle("drawing", !selectionMode && drawingGesture && drawEnabled);
   if (activeWorkspace === "draw" && !selectionMode && drawingGesture && drawEnabled && inCanvas) {
     // Short detector gaps are recoverable: addPoint() bridges the gap with
@@ -2061,7 +2243,7 @@ document.querySelectorAll("[data-transform-mode]").forEach((button) => button.ad
 document.querySelectorAll("[data-model-target]").forEach((button) => button.addEventListener("click", () => {
   setModelTargetScope(button.dataset.modelTarget);
     lastModelHandTip = null; modelHandGesture = false; modelHandPose = "idle"; modelGestureCandidate = null; modelGestureCandidateFrames = 0; resetTwoHandControl();
-  setStatus(modelTargetScope === "whole" ? "操作目标已切换为整体模型；单指移动、握拳旋转、捏合缩放。" : "操作目标已切换为选中部件；可用 V 字手势在模型上选中部件。", "info");
+  setStatus(modelTargetScope === "whole" ? "操作目标已切换为整体模型；单指移动、握拳旋转、捏合缩放。" : "操作目标已切换为选中部件；小拇指进入选择后用食指指向部件。", "info");
 }));
 $("modelSensitivity").addEventListener("input", (event) => { modelSensitivity = Number(event.target.value); $("modelSensitivityValue").textContent = `${modelSensitivity.toFixed(2)}×`; });
 $("screenAxisToggle").addEventListener("click", (event) => {
@@ -2075,7 +2257,7 @@ $("modelSmoothing").addEventListener("input", (event) => { modelSmoothing = Numb
 $("modelTwoHandMode").addEventListener("change", (event) => {
   modelTwoHandMode = event.target.checked;
   resetTwoHandControl();
-  setStatus(modelTwoHandMode ? "双手高级模式已启用：两手同时捏合后可平移、缩放和滚转。" : "双手高级模式已关闭，使用单手 V 字选择、单指移动、握拳旋转和捏合缩放。", "info");
+  setStatus(modelTwoHandMode ? "双手高级模式已启用：两手同时捏合后可平移、缩放和滚转。" : "双手高级模式已关闭，使用小拇指选择、食指指向、单指移动、握拳旋转和捏合缩放。", "info");
   updateModelGestureUI();
 });
 $("resetViewBtn").addEventListener("click", () => { fitModelScene(); setStatus("已重置模型视角与整体比例。", "info"); });
@@ -2089,7 +2271,8 @@ $("framePartBtn").addEventListener("click", frameSelectedModel);
 $("frameAllBtn").addEventListener("click", frameAllModelObjects);
 $("explodePartBtn").addEventListener("click", explodeSelectedModel);
 $("removeAllPartsBtn").addEventListener("click", () => { modelParts.forEach(disposeModelPart); modelParts = []; selectedModelObjects.clear(); selectedModelObject = null; modelSelectionGroup?.clear(); showModelSelectionHelper(null); resetModelAssemblyTransform(); modelTransform?.detach(); $("modelViewerPlaceholder")?.classList.remove("hidden"); updateScenePartList(); updateSelectedPartLabel(); updateModelGestureUI(); setStatus("已移除场景中的全部部件。", "info"); });
-$("modelHandControlBtn").addEventListener("click", () => { modelHandControl = !modelHandControl; lastModelHandTip = null; modelMoveAnchor = null; modelHandGesture = false; modelHandPose = "idle"; modelGestureCandidate = null; modelGestureCandidateFrames = 0; modelSelectionCommitted = false; resetTwoHandControl(); $("modelHandControlBtn").setAttribute("aria-pressed", String(modelHandControl)); $("modelHandControlBtn").textContent = modelHandControl ? "✋ 关闭 3D 手势" : "✋ 启用 3D 手势"; $("modelHandCursor").classList.remove("visible"); updateTransformAttachment(); if (modelHandControl) { modelOrbit.enabled = false; setStatus("3D 手势已启用：" + (primaryHand === "Right" ? "右" : "左") + "手 V 字选件、单指移动、握拳旋转、捏合缩放、竖拇指切整体；张掌或放松停止。" + (modelTwoHandMode ? " 双手高级模式已开启。" : ""), "info"); } else { modelOrbit.enabled = true; setStatus("3D 手势已关闭，可使用鼠标和变换手柄操作。", "info"); } updateModelGestureUI(); });
+$("modelHandControlBtn").addEventListener("click", () => { modelHandControl = !modelHandControl; lastModelHandTip = null; modelMoveAnchor = null; modelHandGesture = false; modelHandPose = "idle"; modelGestureCandidate = null; modelGestureCandidateFrames = 0; modelSelectionCommitted = false; modelSelectionNeedsNeutral = false; modelNeutralSince = 0; modelNeutralArmed = !modelHandControl; modelPinkySelectionActive = false; if (!modelHandControl) { modelVoiceMode = null; modelVoiceNeedsRearm = false; } resetTwoHandControl(); $("modelHandControlBtn").setAttribute("aria-pressed", String(modelHandControl)); $("modelHandControlBtn").textContent = modelHandControl ? "✋ 关闭 3D 手势" : "✋ 启用 3D 手势"; $("modelHandCursor").classList.remove("visible"); updateTransformAttachment(); if (modelHandControl) { modelOrbit.enabled = false; setStatus("3D 手势已启用：" + (primaryHand === "Right" ? "右" : "左") + "手小拇指选模式、食指指向选件、单指移动、握拳旋转、捏合缩放、竖拇指切整体；先张掌保持 0.5 秒完成安全解锁。" + (modelTwoHandMode ? " 双手高级模式已开启。" : ""), "info"); } else { modelOrbit.enabled = true; setStatus("3D 手势已关闭，可使用鼠标和变换手柄操作。", "info"); } updateModelGestureUI(); });
+$("voiceModeBtn").addEventListener("click", toggleVoiceRecognition);
 $("drawToggleBtn").addEventListener("click", () => { drawEnabled = !drawEnabled; if (!drawEnabled) finishStroke(); $("drawToggleBtn").setAttribute("aria-pressed", String(drawEnabled)); $("drawToggleLabel").textContent = drawEnabled ? "绘画已启用" : "绘画已暂停"; setStatus(drawEnabled ? "绘画模式已启用。" : "绘画模式已暂停。", "info"); });
 $("undoBtn").addEventListener("click", () => { finishStroke(); strokes.pop(); selectedStroke = null; redrawAll(); setStatus(strokes.length ? "已撤销上一笔。" : "没有可撤销的笔画。"); });
 $("clearBtn").addEventListener("click", () => { finishStroke(); strokes = []; selectedStroke = null; redrawAll(); setStatus("画布已清空。", "info"); });
@@ -2098,7 +2281,7 @@ $("primaryHandSelect").addEventListener("change", (event) => {
   primaryHand = event.target.value;
   primaryHandTrack = null;
   finishStroke();
-  lastModelHandTip = null; modelMoveAnchor = null; modelHandGesture = false; modelHandPose = "idle"; modelGestureCandidate = null; modelGestureCandidateFrames = 0;
+  lastModelHandTip = null; modelMoveAnchor = null; modelHandGesture = false; modelHandPose = "idle"; modelGestureCandidate = null; modelGestureCandidateFrames = 0; modelPinkySelectionActive = false; modelSelectionNeedsNeutral = false; modelNeutralSince = 0; modelNeutralArmed = !modelHandControl;
   updateModelGestureUI();
   setStatus(`交互主手已切换为${primaryHand === "Right" ? "右手" : "左手"}；另一只手只显示骨架，不会绘画或控制模型。`, "info");
 });
@@ -2108,7 +2291,7 @@ $("handLabelToggle").addEventListener("click", (event) => {
   event.currentTarget.setAttribute("aria-pressed", String(swapHandLabels));
   event.currentTarget.textContent = `左右手标签：${swapHandLabels ? "已反转" : "正常"}`;
   finishStroke();
-  lastModelHandTip = null; modelHandGesture = false; modelHandPose = "idle"; modelGestureCandidate = null; modelGestureCandidateFrames = 0; resetTwoHandControl();
+  lastModelHandTip = null; modelHandGesture = false; modelHandPose = "idle"; modelGestureCandidate = null; modelGestureCandidateFrames = 0; modelPinkySelectionActive = false; modelSelectionNeedsNeutral = false; modelNeutralSince = 0; modelNeutralArmed = !modelHandControl; resetTwoHandControl();
   setStatus(swapHandLabels ? "左右手标签已反转，请按画面标签重新选择主手。" : "左右手标签已恢复正常。", "info");
 });
 $("brushSize").addEventListener("input", (event) => { brushSize = Number(event.target.value); $("sizeValue").textContent = `${brushSize} px`; });
@@ -2119,4 +2302,4 @@ updateSingleScreenOverlay();
 updateGestureModeUI();
 updateHyper3DInputMode();
 refreshHyper3DConfig();
-window.addEventListener("beforeunload", stopCamera);
+window.addEventListener("beforeunload", () => { voiceRecognitionRunning = false; voiceRecognition?.stop(); stopCamera(); });
