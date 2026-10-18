@@ -8,7 +8,8 @@
     "start": "node server.mjs",
     "dev": "node server.mjs",
     "check": "node --check app.js && node --check server.mjs",
-    "catalog": "node scripts/build_model_catalog.mjs"
+    "catalog": "node scripts/build_model_catalog.mjs",
+    "start8001": "node server.integration.mjs"
   },
   "engines": {
     "node": ">=18.18"

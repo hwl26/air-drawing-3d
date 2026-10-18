@@ -4,6 +4,7 @@ import { OBJLoader } from "three/addons/loaders/OBJLoader.js";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { TransformControls } from "three/addons/controls/TransformControls.js";
+import { createPinchOwner, createDrawingGain, INDEX_PINCH_START, INDEX_PINCH_END } from "./pinch-owner.js?v=20261018-drawing-merge-v1";
 
 const MODEL_ROOT = "partof_BP3D_4.0_obj_99/partof_BP3D_4.0_obj_99/";
 const MODEL_CATALOG_URL = "model-catalog.json";
@@ -15,6 +16,11 @@ const CONNECTIONS = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10
 const STROKE_RESUME_WINDOW_MS = 420;
 const GESTURE_HOLD_MS = 240;
 const MODEL_NEUTRAL_HOLD_MS = 500;
+const DRAW_PINCH_START_RATIO = INDEX_PINCH_START;
+const DRAW_PINCH_END_RATIO = INDEX_PINCH_END;
+const MIN_DRAW_POINT_DISTANCE = 0.35;
+const drawingPinchOwner = createPinchOwner();
+const drawingGain = createDrawingGain();
 
 const $ = (id) => document.getElementById(id);
 const video = $("video");
@@ -43,6 +49,7 @@ let filterX = null;
 let filterY = null;
 let handPresent = false;
 let pinchActive = false;
+let drawingPinchActive = false;
 let indexModeActive = false;
 let drawingActive = false;
 let drawEnabled = true;
@@ -1063,7 +1070,7 @@ function updateModelGestureUI() {
   updateVoiceModeUI();
 }
 
-function classifyModelHandPose(landmarks, pinching) {
+function classifyModelHandPose(landmarks, pinching, pinchRatio = Infinity) {
   // Perspective and hand tilt can make a truly straight finger measure below
   // 138 degrees. Use a tolerant extension threshold and keep commands mutually
   // exclusive so a pointing hand cannot become a selection command.
@@ -1096,8 +1103,12 @@ function classifyModelHandPose(landmarks, pinching) {
   // this before pinch.  Otherwise the pinch hysteresis would steal the fist
   // for a few frames and make the model keep scaling instead of rotating.
   if (fistClosed) return "rotate";
+  const indexOnly = index && !middle && !ring && !pinky;
+  // Prefer a clean pointing pose over ambiguous thumb/index proximity. Keep a
+  // very tight pinch available for scaling when the thumb is reliably in frame.
+  if (indexOnly && (!pinching || pinchRatio >= .22)) return "move";
   if (pinching) return "scale";
-  if (index && !middle && !ring && !pinky) return "move";
+  if (indexOnly) return "move";
   return "idle";
 }
 
@@ -1118,9 +1129,18 @@ function normalizedPalmPoint(landmarks) {
 }
 
 function pinchRatioForLandmarks(landmarks) {
+  if (!thumbLandmarksVisible(landmarks)) return Infinity;
   const pinch = Math.hypot(landmarks[4].x - landmarks[8].x, landmarks[4].y - landmarks[8].y);
   const span = Math.hypot(landmarks[0].x - landmarks[9].x, landmarks[0].y - landmarks[9].y);
   return pinch / Math.max(.001, span);
+}
+
+function thumbLandmarksVisible(landmarks) {
+  if (!landmarks || landmarks.length <= 4) return false;
+  const thumb = [2, 3, 4].map((index) => landmarks[index]);
+  if (thumb.some((point) => !point || !Number.isFinite(point.x) || !Number.isFinite(point.y) || point.x < 0 || point.x > 1 || point.y < 0 || point.y > 1)) return false;
+  const tip = landmarks[4];
+  return tip.x > .015 && tip.x < .985 && tip.y > .015 && tip.y < .985;
 }
 
 function resetTwoHandControl() {
@@ -1622,6 +1642,8 @@ function resizeAll() {
 
 function setTool(tool) {
   finishStroke();
+  drawingPinchOwner.reset();
+  drawingGain.reset();
   selectionMode = tool === "select";
   isEraser = tool === "eraser";
   if (!selectionMode) selectedStroke = null;
@@ -1819,6 +1841,8 @@ function finishStroke(redraw = true) {
   if (currentStroke?.points?.length) strokes.push(currentStroke);
   currentStroke = null;
   drawingActive = false;
+  drawingPinchActive = false;
+  drawingGain.reset();
   lastDrawTimestamp = 0;
   if (redraw) updateDrawingUI();
 }
@@ -1839,9 +1863,9 @@ function addPoint(point, timestamp = performance.now()) {
     drawSegments(currentStroke, [clamped, { x: clamped.x + 0.001, y: clamped.y + 0.001 }]);
   } else {
     const distance = Math.hypot((clamped.x - previous.x) * rect.width, (clamped.y - previous.y) * rect.height);
-    if (distance > 1.2) {
+    if (distance > MIN_DRAW_POINT_DISTANCE) {
       // Fill dropped samples so fast hand motion remains one continuous stroke.
-      const steps = Math.min(80, Math.max(1, Math.ceil(distance / 5)));
+      const steps = Math.min(160, Math.max(1, Math.ceil(distance / 4)));
       const segmentPoints = [previous];
       for (let step = 1; step <= steps; step += 1) {
         const ratio = step / steps;
@@ -2023,6 +2047,7 @@ function updateTracking(landmarks, timestamp, secondaryLandmarks = null) {
       if (currentStroke) drawGestureHoldUntil = timestamp + STROKE_RESUME_WINDOW_MS;
     }
     if (currentStroke && missingSince && timestamp - missingSince > STROKE_RESUME_WINDOW_MS) finishStroke();
+    drawingPinchOwner.reset(); drawingGain.reset();
     handPresent = false; smoothedTip = null; pinchActive = false; indexModeActive = false; filterX = null; filterY = null; lastFilterTime = 0;
     lastDepthMeasurement = null;
     $("handValue").textContent = "0 / 2"; $("trackingChipText").textContent = "等待手部"; $("trackingChip").querySelector(".chip-dot").classList.remove("active");
@@ -2044,15 +2069,31 @@ function updateTracking(landmarks, timestamp, secondaryLandmarks = null) {
   if (!filterX) { filterX = new OneEuroFilter(); filterY = new OneEuroFilter(); }
   smoothedTip = { x: filterX.filter(rawTip.x, dt), y: filterY.filter(rawTip.y, dt) };
   lastFilterTime = timestamp;
+  // Keep the 3D cursor fully smoothed, while letting the drawing cursor use a
+  // little more raw motion so fast strokes do not visibly lag behind the hand.
+  const trackingError = Math.hypot(rawTip.x - smoothedTip.x, rawTip.y - smoothedTip.y);
+  const rawDrawingBlend = Math.min(.72, .35 + trackingError * 8);
+  const drawingTip = {
+    x: smoothedTip.x * (1 - rawDrawingBlend) + rawTip.x * rawDrawingBlend,
+    y: smoothedTip.y * (1 - rawDrawingBlend) + rawTip.y * rawDrawingBlend
+  };
   const width = video.videoWidth || 1, height = video.videoHeight || 1;
+  const thumbVisible = thumbLandmarksVisible(landmarks);
   const pinchDistance = Math.hypot((landmarks[4].x - landmarks[8].x) * width, (landmarks[4].y - landmarks[8].y) * height);
   const palmSpan = Math.hypot((landmarks[0].x - landmarks[9].x) * width, (landmarks[0].y - landmarks[9].y) * height);
   const pinchRatio = pinchDistance / Math.max(1, palmSpan);
-  pinchActive = pinchActive ? pinchRatio < .42 : pinchRatio < .30;
+  pinchActive = thumbVisible && (pinchActive ? pinchRatio < .42 : pinchRatio < .30);
   const pinching = pinchActive;
+  const middleDistance = Math.hypot((landmarks[4].x - landmarks[12].x) * width, (landmarks[4].y - landmarks[12].y) * height);
+  const middleRatio = middleDistance / Math.max(1, palmSpan);
+  const drawingOwner = drawingPinchOwner.update({
+    indexRatio: thumbVisible ? pinchRatio : Number.POSITIVE_INFINITY,
+    middleRatio: thumbVisible ? middleRatio : Number.POSITIVE_INFINITY,
+    enabled: activeWorkspace === "draw" && drawEnabled && !selectionMode
+  });
   const indexAngle = fingerExtensionAngle(landmarks, 5, 6, 8);
   const foldedFingerAngles = [fingerExtensionAngle(landmarks, 9, 10, 12), fingerExtensionAngle(landmarks, 13, 14, 16), fingerExtensionAngle(landmarks, 17, 18, 20)];
-  const detectedModelPose = classifyModelHandPose(landmarks, pinching);
+  const detectedModelPose = classifyModelHandPose(landmarks, pinching, pinchRatio);
   const modelPose = activeWorkspace === "model" && modelVoiceMode && !modelVoiceNeedsRearm
     ? modelVoiceMode
     : modelPinkySelectionActive && detectedModelPose !== "idle"
@@ -2078,10 +2119,16 @@ function updateTracking(landmarks, timestamp, secondaryLandmarks = null) {
     ? indexAngle > 124 && foldedCount >= 1
     : indexAngle > 136 && foldedCount >= 2;
   indexModeActive = indexPose;
-  const poseDrawing = gestureMode === "pinch" ? pinching : indexPose;
+  const drawingPinching = drawingOwner === "index"
+    && (drawingPinchActive ? pinchRatio < DRAW_PINCH_END_RATIO : pinchRatio < DRAW_PINCH_START_RATIO);
+  const poseDrawing = gestureMode === "pinch" ? drawingPinching : indexPose;
   if (poseDrawing) drawGestureHoldUntil = timestamp + GESTURE_HOLD_MS;
   const drawingGesture = poseDrawing || timestamp < drawGestureHoldUntil;
-  const drawPoint = mapTipToCanvas(smoothedTip, drawingCanvas);
+  drawingPinchActive = gestureMode === "pinch" && drawingGesture && drawingOwner === "index";
+  const mappedPoint = mapTipToCanvas(drawingTip, drawingCanvas);
+  const drawPoint = activeWorkspace === "draw" && !selectionMode && drawingGesture
+    ? drawingGain.map(mappedPoint)
+    : mappedPoint;
   // A small edge tolerance prevents the crop/landmark jitter at the bottom edge
   // from lifting the pen for a single frame. Points are clamped before drawing.
   const edgeTolerance = 0.045;
@@ -2210,6 +2257,8 @@ drawingCanvas.addEventListener("pointerup", endStrokeSelection);
 drawingCanvas.addEventListener("pointercancel", endStrokeSelection);
 document.querySelectorAll("[data-gesture-mode]").forEach((button) => button.addEventListener("click", () => {
   gestureMode = button.dataset.gestureMode;
+  drawingPinchOwner.reset();
+  drawingGain.reset();
   finishStroke();
   indexModeActive = false; pinchActive = false; drawGestureHoldUntil = 0;
   updateGestureModeUI();
